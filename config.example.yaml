@@ -1,0 +1,33 @@
+# Configuração do Media Repository Pipeline v4
+
+input_root: /mnt/tank/entrada
+output_root: /mnt/tank/destino
+sqlite_db_path: /mnt/tank/destino/db/index.db
+mode: copy
+scan_interval_seconds: 60
+stable_check_interval_seconds: 5
+stable_check_count: 2
+max_retries_processing: 3
+default_timezone: America/Sao_Paulo
+sidecar_enabled: true
+workers_count: 1
+max_filename_length: 180
+external_tool_timeout_seconds: 30
+low_disk_space_threshold_bytes: 10737418240  # 10 GiB
+pipeline_version: v4
+policy_version: v4-policy-001
+
+ignored_extensions:
+  - .xmp
+  - .aae
+  - .thm
+  - .db
+  - .ini
+  - .json
+  - .txt
+  - .xml
+
+excluded_relative_paths:
+  - .staging
+  - tmp
+  - cache

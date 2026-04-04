@@ -1,0 +1,51 @@
+# Configuração do Media Repository Pipeline v4 — para uso no container Docker
+#
+# Os caminhos /input e /output são os volumes montados no container.
+# NÃO altere input_root e output_root aqui — mude os volumes no docker-compose.yml.
+
+input_root: /input
+output_root: /output
+
+# O banco SQLite ficará em /output/db/index.db
+# sqlite_db_path: /output/db/index.db  # opcional, este é o padrão
+
+# Modo: copy (mantém originais) ou move (remove originais após cópia)
+mode: copy
+
+# Intervalo entre ciclos de scan, em segundos
+scan_interval_seconds: 60
+
+# Verificação de estabilidade de arquivo (evita processar arquivos ainda sendo copiados)
+stable_check_count: 2
+stable_check_interval_seconds: 5
+
+# Tentativas em caso de erro por arquivo
+max_retries_processing: 3
+
+# Fuso horário para fallback de data (quando não há EXIF)
+default_timezone: America/Sao_Paulo
+
+# Gerar sidecars JSON para cada arquivo aceito
+sidecar_enabled: true
+
+# Alerta se espaço livre cair abaixo de 10 GiB
+low_disk_space_threshold_bytes: 10737418240
+
+# Extensões a ignorar completamente (metadados paralelos, thumbs, etc.)
+ignored_extensions:
+  - .xmp
+  - .aae
+  - .thm
+  - .db
+  - .ini
+  - .json
+  - .txt
+  - .xml
+
+# Subpastas dentro de cada repositório a excluir do scan
+excluded_relative_paths:
+  - .staging
+  - tmp
+  - cache
+  - @eaDir        # pasta de thumbnails do Synology (seguro manter aqui)
+  - .@__thumb     # pasta de thumbnails do QNAP

@@ -1,0 +1,1340 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NASUgreen · Pipeline</title>
+<style>
+:root {
+  --bg:       #0d0f12;
+  --surface:  #161b22;
+  --surface2: #1c2129;
+  --border:   #30363d;
+  --text:     #e6edf3;
+  --text2:    #8b949e;
+  --accent:   #58a6ff;
+  --accent-a: rgba(88,166,255,.12);
+  --green:    #3fb950;
+  --amber:    #d29922;
+  --red:      #f85149;
+  --r:        7px;
+  --rs:       4px;
+  --mono:     "SF Mono","Fira Code","Cascadia Code",ui-monospace,monospace;
+}
+
+*,*::before,*::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html,body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  overflow: hidden;
+}
+
+/* ── Layout ── */
+#app {
+  display: grid;
+  grid-template-rows: 52px 40px auto 1fr;
+  height: 100vh;
+}
+
+/* ── Header ── */
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 18px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.logo { display: flex; align-items: center; gap: 9px; }
+
+.logo-icon {
+  width: 30px; height: 30px;
+  background: var(--accent);
+  border-radius: 7px;
+  display: grid; place-items: center;
+  font-size: 15px;
+  flex-shrink: 0;
+}
+
+.logo-title { font-size: 14px; font-weight: 600; letter-spacing: -.2px; }
+.logo-sub   { font-size: 11px; color: var(--text2); }
+
+.hactions { display: flex; align-items: center; gap: 10px; }
+
+/* Status badge */
+.badge {
+  display: flex; align-items: center; gap: 6px;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 12px; font-weight: 500;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+}
+
+.bdot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--text2);
+}
+
+.badge.running .bdot {
+  background: var(--green);
+  box-shadow: 0 0 5px var(--green);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+/* Buttons */
+.btn {
+  display: flex; align-items: center; gap: 5px;
+  padding: 5px 12px;
+  border-radius: var(--rs);
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 12px; font-weight: 500;
+  cursor: pointer;
+  transition: border-color .15s,color .15s,background .15s;
+  white-space: nowrap;
+  user-select: none;
+}
+.btn:hover    { border-color: var(--accent); color: var(--accent); background: var(--accent-a); }
+.btn:active   { transform: scale(.97); }
+.btn:disabled { opacity: .4; cursor: not-allowed; pointer-events: none; }
+
+.btn-primary  { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn-primary:hover { background: #79b8ff; border-color: #79b8ff; color: #fff; }
+.btn-stop:hover    { border-color: var(--red); color: var(--red); background: rgba(248,81,73,.1); }
+
+/* ── Stats bar ── */
+#sbar {
+  display: flex; align-items: center;
+  padding: 0 18px; gap: 0;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+#sbar::-webkit-scrollbar { display: none; }
+
+.sitem { display: flex; align-items: center; gap: 5px; padding: 0 10px; white-space: nowrap; }
+.slabel { font-size: 11px; color: var(--text2); }
+.sval   { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.ssep   { width: 1px; height: 16px; background: var(--border); }
+
+.s-seen .sval     { color: var(--text); }
+.s-kept .sval     { color: var(--green); }
+.s-dup  .sval     { color: var(--accent); }
+.s-rev  .sval     { color: var(--amber); }
+.s-skip .sval     { color: var(--text2); }
+.s-err  .sval     { color: var(--red); }
+
+.srun-info { margin-left: auto; font-size: 11px; color: var(--text2); padding-left: 16px; white-space: nowrap; }
+
+/* ── Tabs ── */
+.tabs {
+  display: flex; align-items: center;
+  padding: 0 18px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.tab {
+  padding: 8px 14px;
+  font-size: 12px; color: var(--text2);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color .15s, border-color .15s;
+  display: flex; align-items: center; gap: 5px;
+  white-space: nowrap;
+}
+.tab:hover  { color: var(--text); }
+.tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+.tbadge {
+  font-size: 10px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  padding: 1px 5px; border-radius: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Panels ── */
+.panels { overflow: hidden; position: relative; }
+
+.panel {
+  position: absolute; inset: 0;
+  display: none; flex-direction: column;
+  overflow: hidden;
+}
+.panel.active { display: flex; }
+
+/* ── Log terminal ── */
+.log-toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 5px 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 11px; color: var(--text2);
+  flex-shrink: 0;
+}
+
+.log-actions { display: flex; align-items: center; gap: 10px; }
+
+label.asc { display: flex; align-items: center; gap: 5px; cursor: pointer; user-select: none; }
+
+#log-out {
+  flex: 1; overflow-y: auto;
+  padding: 10px 18px;
+  font-family: var(--mono);
+  font-size: 12px; line-height: 1.65;
+  background: #0a0b0d;
+}
+
+.ll { display: block; word-break: break-all; }
+.ll.info    { color: #c9d1d9; }
+.ll.warn    { color: var(--amber); }
+.ll.err     { color: var(--red); }
+.ll.ok      { color: var(--green); }
+.ll.hdr     { color: var(--accent); font-weight: 600; }
+.ll.dim     { color: var(--text2); }
+.ll.new     { animation: fadeIn .2s ease; }
+
+@keyframes fadeIn { from { opacity:0; transform: translateX(-3px); } to { opacity:1; transform:none; } }
+
+/* ── File browser ── */
+.fbrowser { display: flex; flex-direction: column; overflow: hidden; height: 100%; }
+
+.fbtoolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  gap: 10px; flex-shrink: 0;
+}
+
+.breadcrumb {
+  display: flex; align-items: center; gap: 3px;
+  flex: 1; min-width: 0;
+  font-size: 12px; overflow: hidden;
+}
+
+.bci {
+  color: var(--text2); cursor: pointer;
+  white-space: nowrap;
+  max-width: 130px; overflow: hidden; text-overflow: ellipsis;
+  transition: color .1s;
+}
+.bci:hover   { color: var(--accent); }
+.bci.cur     { color: var(--text); cursor: default; }
+.bcsep       { color: var(--border); flex-shrink: 0; }
+
+.vtoggle { display: flex; gap: 2px; }
+
+.vbtn {
+  padding: 3px 7px; border-radius: var(--rs);
+  background: none; border: none; color: var(--text2);
+  cursor: pointer; font-size: 13px;
+  transition: color .1s, background .1s;
+}
+.vbtn:hover  { color: var(--text); }
+.vbtn.active { background: var(--surface2); color: var(--text); }
+
+.fbcontent {
+  flex: 1; overflow-y: auto;
+  padding: 14px 18px;
+}
+
+/* Grid */
+.fgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 10px;
+}
+
+.fcard {
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+  padding: 9px;
+  border-radius: var(--r);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+  min-width: 0;
+}
+.fcard:hover { border-color: var(--accent); background: var(--accent-a); }
+
+.fthumb {
+  width: 100%; aspect-ratio: 1;
+  object-fit: cover; border-radius: var(--rs);
+  background: var(--surface2);
+  display: block;
+}
+
+.ficon {
+  width: 100%; aspect-ratio: 1;
+  display: grid; place-items: center;
+  font-size: 34px;
+  background: var(--surface2);
+  border-radius: var(--rs);
+}
+
+.fname {
+  font-size: 10px; text-align: center;
+  word-break: break-all; line-height: 1.3;
+  width: 100%; overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.fmeta { font-size: 10px; color: var(--text2); }
+
+/* List */
+.flist { display: flex; flex-direction: column; gap: 1px; }
+
+.fli {
+  display: grid;
+  grid-template-columns: 20px 1fr auto auto;
+  align-items: center; gap: 8px;
+  padding: 6px 8px; border-radius: var(--rs);
+  cursor: pointer;
+  transition: background .1s;
+}
+.fli:hover { background: var(--surface2); }
+
+.fli-ico  { font-size: 13px; text-align: center; }
+.fli-name { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fli-sz   { font-size: 11px; color: var(--text2); white-space: nowrap; }
+.fli-ext  { font-size: 10px; color: var(--text2); background: var(--surface2); padding: 1px 5px; border-radius: 3px; white-space: nowrap; }
+
+/* Empty / loading */
+.empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 60px 20px; color: var(--text2); gap: 8px;
+}
+.empty-ico  { font-size: 44px; opacity: .25; }
+.empty-txt  { font-size: 13px; }
+
+/* Spinner */
+.spin {
+  display: inline-block;
+  width: 14px; height: 14px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: rot .7s linear infinite;
+}
+@keyframes rot { to { transform: rotate(360deg); } }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #444c56; }
+
+/* Toast */
+#toast {
+  position: fixed; bottom: 18px; right: 18px;
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: var(--r); padding: 9px 14px;
+  font-size: 12px; display: none; z-index: 999;
+  animation: slideUp .2s ease;
+  max-width: 320px;
+}
+@keyframes slideUp { from { transform:translateY(8px); opacity:0; } to { transform:none; opacity:1; } }
+
+/* ── Cleanup Modal ── */
+.modal-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,.25);   /* quase transparente — logs ficam visíveis atrás */
+  display: flex;
+  align-items: flex-start;       /* alinha ao topo */
+  justify-content: flex-end;     /* alinha à direita */
+  z-index: 900;
+  /* sem backdrop-filter: logs da tela principal ficam legíveis */
+  padding: 56px 16px 0 0;        /* respeita o header */
+  animation: fadeIn .15s ease;
+  pointer-events: none;          /* cliques passam pelo overlay... */
+}
+.modal-overlay.hidden { display: none; }
+/* ...mas o modal em si captura cliques normalmente */
+.modal { pointer-events: all; }
+
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 22px 24px;
+  width: min(420px, 92vw);
+  max-height: calc(100vh - 80px);
+  overflow-y: auto;
+  display: flex; flex-direction: column; gap: 14px;
+  animation: scaleIn .15s ease;
+  box-shadow: 0 8px 32px rgba(0,0,0,.5);
+}
+@keyframes scaleIn { from { transform:scale(.96) translateY(-6px); opacity:0; } to { transform:none; opacity:1; } }
+
+.modal-title {
+  font-size: 15px; font-weight: 600;
+  display: flex; align-items: center; gap: 8px;
+}
+.modal-title-close {
+  margin-left: auto;
+  background: none; border: none;
+  color: var(--text2); font-size: 16px;
+  cursor: pointer; padding: 0 2px;
+  line-height: 1; border-radius: 4px;
+  transition: color .15s, background .15s;
+}
+.modal-title-close:hover { color: var(--text); background: var(--surface2); }
+
+.modal-desc { font-size: 12px; color: var(--text2); line-height: 1.6; }
+
+.modal-stats {
+  display: grid; grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+}
+.mstat {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: var(--r); padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.mstat-label { font-size: 10px; color: var(--text2); }
+.mstat-val   { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.mstat-val.green { color: var(--green); }
+.mstat-val.amber { color: var(--amber); }
+
+.modal-options { display: flex; flex-direction: column; gap: 8px; }
+
+.opt-row {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 8px 12px;
+  border-radius: var(--rs);
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  cursor: pointer;
+  transition: border-color .15s;
+}
+.opt-row input[type=radio] { accent-color: var(--accent); flex-shrink: 0; margin-top: 2px; }
+.opt-label { font-size: 12px; font-weight: 500; }
+.opt-sub   { font-size: 11px; color: var(--text2); }
+
+.modal-footer {
+  display: flex; gap: 8px; justify-content: flex-end;
+}
+
+.btn-danger  { background: var(--red);   border-color: var(--red);   color: #fff; }
+.btn-danger:hover  { background: #ff6b6b; border-color: #ff6b6b; color: #fff; }
+
+.btn-amber   { background: var(--amber); border-color: var(--amber); color: #000; }
+.btn-amber:hover { opacity: .85; }
+
+#cleanup-progress {
+  height: 2px; background: var(--border);
+  border-radius: 2px; overflow: hidden; display: none;
+}
+#cleanup-bar {
+  height: 100%; width: 0%; background: var(--accent);
+  transition: width .3s ease;
+}
+
+/* Log de arquivos dentro do modal */
+#cleanup-filelog {
+  display: none;
+  margin: 10px 0 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--rs);
+  padding: 8px 10px;
+  max-height: 200px;
+  overflow-y: auto;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  line-height: 1.6;
+}
+#cleanup-filelog::-webkit-scrollbar { width: 4px; }
+#cleanup-filelog::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.cll { display: block; }
+.cll-remove { color: #3fb950; }
+.cll-dryrun { color: var(--accent); }
+.cll-warn   { color: var(--amber, #e3b341); }
+.cll-error  { color: var(--red); }
+.cll-fatal  { color: var(--red); font-weight: 600; }
+.cll-hdr    { color: var(--text2); }
+
+/* ── Lightbox ── */
+#lightbox {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,.92);
+  display: none;
+  flex-direction: column;
+  z-index: 950;
+  outline: none;
+}
+#lightbox.open {
+  display: flex;
+  animation: fadeIn .18s ease;
+}
+
+.lb-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px;
+  background: rgba(0,0,0,.5);
+  flex-shrink: 0;
+  gap: 12px;
+}
+.lb-info {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; gap: 1px;
+}
+.lb-name {
+  font-size: 13px; font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lb-meta { font-size: 11px; color: var(--text2); }
+
+.lb-nav {
+  display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+}
+.lb-btn {
+  background: rgba(255,255,255,.08);
+  border: 1px solid rgba(255,255,255,.12);
+  color: var(--text); border-radius: var(--rs);
+  padding: 4px 10px; font-size: 13px; cursor: pointer;
+  transition: background .15s;
+  line-height: 1;
+}
+.lb-btn:hover    { background: rgba(255,255,255,.18); }
+.lb-btn:disabled { opacity: .25; cursor: default; }
+.lb-counter { font-size: 11px; color: var(--text2); white-space: nowrap; }
+
+.lb-btn-close {
+  background: rgba(248,81,73,.15);
+  border: 1px solid rgba(248,81,73,.3);
+  color: var(--red);
+}
+.lb-btn-close:hover { background: rgba(248,81,73,.3); }
+
+.lb-stage {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  overflow: hidden; position: relative;
+  padding: 12px;
+}
+
+.lb-img {
+  max-width: 100%; max-height: 100%;
+  object-fit: contain;
+  border-radius: 4px;
+  box-shadow: 0 8px 40px rgba(0,0,0,.6);
+  transition: opacity .2s ease;
+  display: block;
+}
+.lb-img.loading { opacity: 0; }
+
+.lb-spinner {
+  position: absolute;
+  width: 32px; height: 32px;
+  border: 3px solid rgba(255,255,255,.1);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: rot .7s linear infinite;
+  display: none;
+}
+.lb-spinner.show { display: block; }
+
+.lb-arrow {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  background: rgba(0,0,0,.5); border: 1px solid rgba(255,255,255,.12);
+  color: #fff; font-size: 20px;
+  width: 40px; height: 40px;
+  border-radius: 50%; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: background .15s, opacity .15s;
+  opacity: 0;
+  z-index: 2;
+}
+.lb-stage:hover .lb-arrow { opacity: 1; }
+.lb-arrow:hover  { background: rgba(0,0,0,.75); }
+.lb-arrow:disabled { opacity: .15 !important; cursor: default; }
+.lb-arrow-left  { left: 10px; }
+.lb-arrow-right { right: 10px; }
+
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- Header -->
+  <header>
+    <div class="logo">
+      <div class="logo-icon">🗂</div>
+      <div>
+        <div class="logo-title">NASUgreen</div>
+        <div class="logo-sub">Media Pipeline</div>
+      </div>
+    </div>
+    <div class="hactions">
+      <div class="badge idle" id="badge">
+        <div class="bdot"></div>
+        <span id="btext">Aguardando</span>
+      </div>
+      <button class="btn" id="btn-cleanup" onclick="openCleanupModal()" title="Limpar pasta de entrada">🧹 Limpar Entrada</button>
+      <button class="btn btn-primary" id="btn-run" onclick="triggerRun()">▶ Executar</button>
+      <button class="btn btn-stop"    id="btn-stop" style="display:none" onclick="triggerStop()">■ Parar</button>
+    </div>
+  </header>
+
+  <!-- Stats bar -->
+  <div id="sbar">
+    <div class="sitem s-seen">
+      <span class="slabel">Vistos</span>
+      <span class="sval" id="s-seen">—</span>
+    </div><div class="ssep"></div>
+    <div class="sitem s-kept">
+      <span class="slabel">Aceitos</span>
+      <span class="sval" id="s-kept">—</span>
+    </div><div class="ssep"></div>
+    <div class="sitem s-dup">
+      <span class="slabel">Duplicatas</span>
+      <span class="sval" id="s-dup">—</span>
+    </div><div class="ssep"></div>
+    <div class="sitem s-rev">
+      <span class="slabel">Review</span>
+      <span class="sval" id="s-rev">—</span>
+    </div><div class="ssep"></div>
+    <div class="sitem s-skip">
+      <span class="slabel">Ignorados</span>
+      <span class="sval" id="s-skip">—</span>
+    </div><div class="ssep"></div>
+    <div class="sitem s-err">
+      <span class="slabel">Erros</span>
+      <span class="sval" id="s-err">—</span>
+    </div>
+    <div class="srun-info" id="srun-info"></div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <div class="tab active" data-tab="logs"   onclick="switchTab('logs')">🖥 Logs</div>
+    <div class="tab"        data-tab="input"  onclick="switchTab('input')">
+      📥 Origem <span class="tbadge" id="tb-input">—</span>
+    </div>
+    <div class="tab"        data-tab="output" onclick="switchTab('output')">
+      📤 Destino <span class="tbadge" id="tb-output">—</span>
+    </div>
+  </div>
+
+  <!-- Panels -->
+  <div class="panels">
+
+    <!-- Logs -->
+    <div class="panel active" id="panel-logs">
+      <div class="log-toolbar">
+        <span id="lcount" style="font-variant-numeric:tabular-nums">0 linhas</span>
+        <div class="log-actions">
+          <label class="asc">
+            <input type="checkbox" id="asc" checked style="accent-color:var(--accent)"> Auto-scroll
+          </label>
+          <button class="btn" style="padding:2px 9px;font-size:11px" onclick="clearLogs()">Limpar</button>
+        </div>
+      </div>
+      <div id="log-out"></div>
+    </div>
+
+    <!-- Input -->
+    <div class="panel" id="panel-input">
+      <div class="fbrowser">
+        <div class="fbtoolbar">
+          <div class="breadcrumb" id="bc-input"></div>
+          <div class="vtoggle">
+            <button class="vbtn active" title="grade"  onclick="setView('input','grid')">⊞</button>
+            <button class="vbtn"        title="lista"  onclick="setView('input','list')">☰</button>
+          </div>
+        </div>
+        <div class="fbcontent" id="fc-input">
+          <div class="empty"><div class="empty-ico">📥</div><div class="empty-txt">Selecione a aba para carregar</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Output -->
+    <div class="panel" id="panel-output">
+      <div class="fbrowser">
+        <div class="fbtoolbar">
+          <div class="breadcrumb" id="bc-output"></div>
+          <div class="vtoggle">
+            <button class="vbtn active" title="grade"  onclick="setView('output','grid')">⊞</button>
+            <button class="vbtn"        title="lista"  onclick="setView('output','list')">☰</button>
+          </div>
+        </div>
+        <div class="fbcontent" id="fc-output">
+          <div class="empty"><div class="empty-ico">📤</div><div class="empty-txt">Selecione a aba para carregar</div></div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /panels -->
+</div><!-- /app -->
+
+<div id="toast"></div>
+
+<!-- Cleanup Modal -->
+<div class="modal-overlay hidden" id="cleanup-overlay">
+  <div class="modal" id="cleanup-modal">
+    <div class="modal-title">
+      🧹 Limpar Pasta de Entrada
+      <button class="modal-title-close" onclick="closeCleanupModal()" title="Fechar (Esc)">&#x2715;</button>
+    </div>
+    <div class="modal-desc" id="cleanup-desc">
+      Carregando informações…
+    </div>
+
+    <div class="modal-stats" id="cleanup-stats" style="display:none">
+      <div class="mstat">
+        <span class="mstat-label">Na entrada</span>
+        <span class="mstat-val" id="ms-total">—</span>
+      </div>
+      <div class="mstat">
+        <span class="mstat-label">Elegíveis p/ remover</span>
+        <span class="mstat-val green" id="ms-eligible">—</span>
+      </div>
+      <div class="mstat">
+        <span class="mstat-label">No banco</span>
+        <span class="mstat-val amber" id="ms-db">—</span>
+      </div>
+    </div>
+
+    <div class="modal-options" id="cleanup-options" style="display:none">
+      <label class="opt-row">
+        <input type="radio" name="cleanup-mode" id="opt-dryrun" value="dryrun" checked>
+        <div>
+          <div class="opt-label">🔍 Simulação (dry-run)</div>
+          <div class="opt-sub">Apenas mostra o que seria removido — nada é apagado</div>
+        </div>
+      </label>
+      <label class="opt-row">
+        <input type="radio" name="cleanup-mode" id="opt-real" value="real">
+        <div>
+          <div class="opt-label">🗑 Limpeza real</div>
+          <div class="opt-sub">Remove os arquivos da entrada cujo destino foi confirmado em disco</div>
+        </div>
+      </label>
+    </div>
+
+    <div id="cleanup-progress"><div id="cleanup-bar"></div></div>
+
+    <div id="cleanup-filelog"></div>
+
+    <div class="modal-footer">
+      <button class="btn" id="cleanup-cancel" onclick="closeCleanupModal()">Cancelar</button>
+      <button class="btn btn-amber" id="cleanup-confirm" onclick="triggerCleanup()" disabled>Executar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Lightbox -->
+<div id="lightbox" tabindex="-1" role="dialog" aria-modal="true">
+  <div class="lb-header">
+    <div class="lb-info">
+      <div class="lb-name" id="lb-name"></div>
+      <div class="lb-meta" id="lb-meta"></div>
+    </div>
+    <div class="lb-nav">
+      <button class="lb-btn" id="lb-prev" onclick="lbStep(-1)" title="Anterior (&#8592;)">&#8592;</button>
+      <span class="lb-counter" id="lb-counter"></span>
+      <button class="lb-btn" id="lb-next" onclick="lbStep(1)"  title="Próxima (&#8594;)">&#8594;</button>
+      <button class="lb-btn lb-btn-close" onclick="closeLightbox()" title="Fechar (Esc)">&#x2715; Fechar</button>
+    </div>
+  </div>
+  <div class="lb-stage" id="lb-stage">
+    <span class="lb-spinner" id="lb-spinner"></span>
+    <img class="lb-img loading" id="lb-img" alt="" src="" onload="lbImgLoaded()" onerror="lbImgError()">
+    <button class="lb-arrow lb-arrow-left"  onclick="lbStep(-1)" id="lb-arr-l">&#8249;</button>
+    <button class="lb-arrow lb-arrow-right" onclick="lbStep(1)"  id="lb-arr-r">&#8250;</button>
+  </div>
+</div>
+
+<script>
+// ── Estado ────────────────────────────────────────────────────────────────────
+const S = {
+  status:  'idle',
+  lines:   0,
+  autoScroll: true,
+  views:   { input: 'grid', output: 'grid' },
+  loaded:  { input: false, output: false },
+  entries: { input: [], output: [] },
+};
+
+// ── Cleanup ───────────────────────────────────────────────────────────────────
+const CL = { running: false, total: 0, done: 0 };
+
+async function openCleanupModal() {
+  const overlay = document.getElementById('cleanup-overlay');
+  const desc    = document.getElementById('cleanup-desc');
+  const stats   = document.getElementById('cleanup-stats');
+  const opts    = document.getElementById('cleanup-options');
+  const confirm = document.getElementById('cleanup-confirm');
+
+  overlay.classList.remove('hidden');
+  desc.textContent = 'Carregando informações do banco…';
+  stats.style.display = 'none';
+  opts.style.display  = 'none';
+  confirm.disabled    = true;
+
+  try {
+    const r = await fetch('/api/cleanup/preview');
+    const d = await r.json();
+    if (!r.ok) {
+      desc.textContent = '⚠ ' + (d.error || 'Erro ao carregar dados.');
+      return;
+    }
+    document.getElementById('ms-total').textContent    = d.total_input;
+    document.getElementById('ms-eligible').textContent = d.eligible;
+    document.getElementById('ms-db').textContent       = d.db_records;
+    desc.textContent = d.eligible > 0
+      ? `Encontrados ${d.eligible} arquivo(s) elegíveis para remoção (com destino confirmado em disco).`
+      : 'Nenhum arquivo elegível para remoção no momento.';
+    stats.style.display = 'grid';
+    opts.style.display  = 'flex';
+    confirm.disabled    = d.eligible === 0;
+  } catch (err) {
+    desc.textContent = '⚠ Não foi possível conectar ao servidor.';
+  }
+}
+
+function closeCleanupModal() {
+  if (CL.running) return;
+  document.getElementById('cleanup-overlay').classList.add('hidden');
+  document.getElementById('cleanup-bar').style.width = '0%';
+  document.getElementById('cleanup-progress').style.display = 'none';
+  CL.done = 0; CL.total = 0;
+}
+
+// Esc fecha o modal de cleanup (se não estiver rodando)
+function _overlayClick() {} // mantido para compatibilidade, não usado
+
+async function triggerCleanup() {
+  if (CL.running) return;
+  const dryRun = document.getElementById('opt-dryrun').checked;
+  const confirm = document.getElementById('cleanup-confirm');
+  const cancel  = document.getElementById('cleanup-cancel');
+
+  confirm.disabled = true;
+  cancel.disabled  = true;
+  CL.running = true;
+
+  switchTab('logs');
+  appendLog(`── Limpeza iniciada (${dryRun ? 'DRY-RUN' : 'REAL'}) ──────────────────────`);
+
+  try {
+    const r = await fetch('/api/cleanup/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dry_run: dryRun, statuses: ['kept', 'duplicate'] })
+    });
+    const d = await r.json();
+    if (!r.ok) {
+      showToast('Erro: ' + (d.error || 'desconhecido'));
+      CL.running = false;
+      confirm.disabled = false;
+      cancel.disabled = false;
+    }
+    // progresso atualizado via SSE (cleanup_event/cleanup_status)
+  } catch (_) {
+    showToast('Não foi possível conectar ao servidor.');
+    CL.running = false;
+    confirm.disabled = false;
+    cancel.disabled = false;
+  }
+}
+
+function _clLog(text, cls) {
+  const box = document.getElementById('cleanup-filelog');
+  box.style.display = 'block';
+  const line = document.createElement('span');
+  line.className = 'cll ' + (cls || '');
+  // mostra só o nome do arquivo para economizar espaço
+  line.textContent = text;
+  box.appendChild(line);
+  box.scrollTop = box.scrollHeight;
+}
+
+function _onCleanupEvent(event) {
+  const t = event.type;
+  if (t === 'scanning') {
+    _clLog(`🔍 ${event.message}`, 'cll-hdr');
+    appendLog(`  🔍 ${event.message}`);
+  } else if (t === 'start') {
+    CL.total = event.total;
+    CL.done  = 0;
+    const bar = document.getElementById('cleanup-bar');
+    const prog = document.getElementById('cleanup-progress');
+    if (event.total > 0) { prog.style.display = 'block'; bar.style.width = '0%'; }
+    // Limpa o log de arquivos para nova execução
+    const box = document.getElementById('cleanup-filelog');
+    box.innerHTML = '';
+    box.style.display = 'none';
+    appendLog(`  📋 ${event.total} arquivo(s) na entrada | ${event.db_records} no banco | ${event.eligible} elegíveis`);
+    document.getElementById('ms-total').textContent = event.total;
+    document.getElementById('ms-eligible').textContent = event.eligible;
+    document.getElementById('ms-db').textContent = event.db_records;
+  } else if (t === 'progress') {
+    const pct = event.total > 0 ? Math.round(event.done / event.total * 100) : 0;
+    document.getElementById('cleanup-bar').style.width = pct + '%';
+  } else if (t === 'remove') {
+    CL.done++;
+    const pct = CL.total > 0 ? Math.round(CL.done / CL.total * 100) : 100;
+    document.getElementById('cleanup-bar').style.width = pct + '%';
+    const fname  = event.path.split('/').pop();
+    const isDry  = event.dry_run;
+    const prefix = isDry ? '⟳' : '✓';
+    const label  = isDry ? `[DRY] ${fname}` : `${fname}`;
+    _clLog(`${prefix} ${label}`, isDry ? 'cll-dryrun' : 'cll-remove');
+    appendLog(`  ${isDry ? '[DRY-RUN] removeria' : '✓ removido'}  ${fname}`);
+  } else if (t === 'warn') {
+    const fname = event.path ? event.path.split('/').pop() : '';
+    _clLog(`⚠ ${event.reason}${fname ? ': ' + fname : ''}`, 'cll-warn');
+    appendLog(`  ⚠ ${event.reason}: ${fname}`);
+  } else if (t === 'error') {
+    _clLog(`✗ ${event.detail}`, 'cll-error');
+    appendLog(`  ✗ ERRO: ${event.detail}`);
+  } else if (t === 'fatal') {
+    _clLog(`✗ FATAL: ${event.detail}`, 'cll-fatal');
+    appendLog(`  ✗ FATAL: ${event.detail}`);
+  } else if (t === 'summary') {
+    const s = event.stats;
+    const isDry = event.dry_run;
+    _clLog('─────────────────────────────────', 'cll-hdr');
+    _clLog(`Removidos: ${s.removido}   Erros: ${s.erro}   Pulados: ${s.pulado_sem_registro + s.pulado_status + s.pulado_destino_ausente + s.pulado_tamanho}`, 'cll-hdr');
+    if (isDry) _clLog('(DRY-RUN — nada foi apagado)', 'cll-hdr');
+    appendLog('── Resumo da limpeza ──────────────────────────────────');
+    appendLog(`  Removidos:             ${s.removido}`);
+    appendLog(`  Sem registro no banco: ${s.pulado_sem_registro}`);
+    appendLog(`  Status não autorizado: ${s.pulado_status}`);
+    appendLog(`  Destino ausente:       ${s.pulado_destino_ausente}`);
+    appendLog(`  Tamanho divergente:    ${s.pulado_tamanho}`);
+    appendLog(`  Erros:                 ${s.erro}`);
+    if (isDry) appendLog('  (DRY-RUN — nada foi apagado)');
+    document.getElementById('cleanup-bar').style.width = '100%';
+  }
+}
+
+function _onCleanupStatus({ running }) {
+  if (!running) {
+    CL.running = false;
+    const confirm = document.getElementById('cleanup-confirm');
+    const cancel  = document.getElementById('cleanup-cancel');
+    confirm.disabled = false;
+    cancel.disabled  = false;
+    showToast('✓ Limpeza concluída');
+    // Recarregar browser de entrada
+    if (S.loaded.input) loadFiles('input', '');
+  }
+}
+
+// ── SSE ───────────────────────────────────────────────────────────────────────
+let evtSrc = null;
+
+function connectSSE() {
+  if (evtSrc) evtSrc.close();
+  evtSrc = new EventSource('/api/pipeline/events');
+  evtSrc.onmessage = (e) => {
+    const d = JSON.parse(e.data);
+    if      (d.type === 'log')            appendLog(d.line);
+    else if (d.type === 'status')         onStatus(d);
+    else if (d.type === 'cleanup_event')  _onCleanupEvent(d.event);
+    else if (d.type === 'cleanup_status') _onCleanupStatus(d);
+  };
+  evtSrc.onerror = () => setTimeout(connectSSE, 3000);
+}
+
+let _statsPollTimer = null;
+
+function onStatus({ status, returncode }) {
+  S.status = status;
+  const badge  = document.getElementById('badge');
+  const btext  = document.getElementById('btext');
+  const btnRun = document.getElementById('btn-run');
+  const btnStp = document.getElementById('btn-stop');
+
+  badge.className = `badge ${status}`;
+
+  if (status === 'running') {
+    btext.textContent = 'Executando…';
+    btnRun.style.display = 'none';
+    btnStp.style.display = 'flex';
+    // Polling de stats a cada 8s durante execução
+    if (!_statsPollTimer) {
+      _statsPollTimer = setInterval(loadStats, 8000);
+    }
+  } else {
+    btext.textContent = 'Aguardando';
+    btnRun.style.display = 'flex';
+    btnStp.style.display = 'none';
+    // Para o polling quando idle
+    if (_statsPollTimer) { clearInterval(_statsPollTimer); _statsPollTimer = null; }
+    if (returncode !== undefined) {
+      showToast(returncode === 0 ? '✓ Execução concluída com sucesso' : `✗ Encerrado (código ${returncode})`);
+      loadStats();
+      // Recarregar browsers abertos
+      if (S.loaded.input)  loadFiles('input',  '');
+      if (S.loaded.output) loadFiles('output', '');
+    }
+  }
+}
+
+// ── Logs ──────────────────────────────────────────────────────────────────────
+function appendLog(raw) {
+  const out = document.getElementById('log-out');
+  const el  = document.createElement('span');
+  el.className = 'll new ' + logClass(raw);
+  el.textContent = raw;
+  out.appendChild(el);
+  out.appendChild(document.createTextNode('\n'));
+  S.lines++;
+  document.getElementById('lcount').textContent = `${S.lines} linhas`;
+  if (S.autoScroll) out.scrollTop = out.scrollHeight;
+  setTimeout(() => el.classList.remove('new'), 300);
+}
+
+function logClass(line) {
+  if (/ERROR|✗/.test(line))           return 'err';
+  if (/WARNING|WARN/.test(line))      return 'warn';
+  if (/✓/.test(line))                 return 'ok';
+  if (/═══|───/.test(line))           return 'hdr';
+  if (/DEBUG/.test(line))             return 'dim';
+  return 'info';
+}
+
+function clearLogs() {
+  document.getElementById('log-out').innerHTML = '';
+  S.lines = 0;
+  document.getElementById('lcount').textContent = '0 linhas';
+}
+
+document.getElementById('asc').addEventListener('change', (e) => { S.autoScroll = e.target.checked; });
+
+// ── Stats ─────────────────────────────────────────────────────────────────────
+async function loadStats() {
+  try {
+    const r = await fetch('/api/db/last-run');
+    const d = await r.json();
+    if (!d.last_run) return;
+    const run = d.last_run;
+    document.getElementById('s-seen').textContent = run.files_seen      ?? 0;
+    document.getElementById('s-kept').textContent = run.files_kept      ?? 0;
+    document.getElementById('s-dup') .textContent = run.files_duplicate ?? 0;
+    document.getElementById('s-rev') .textContent = run.files_review    ?? 0;
+    document.getElementById('s-skip').textContent = run.files_skipped   ?? 0;
+    document.getElementById('s-err') .textContent = run.files_corrupted ?? 0;
+    if (run.finished_at) {
+      const dt = new Date(run.finished_at);
+      document.getElementById('srun-info').textContent =
+        `Última execução: ${dt.toLocaleString('pt-BR')} · Run #${run.id}`;
+    }
+  } catch (_) {}
+}
+
+// ── Pipeline ──────────────────────────────────────────────────────────────────
+async function triggerRun() {
+  const btn = document.getElementById('btn-run');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/pipeline/run', { method: 'POST' });
+    if (!r.ok) {
+      const e = await r.json();
+      showToast('Erro: ' + (e.detail ?? 'desconhecido'));
+    } else {
+      switchTab('logs');
+    }
+  } catch (_) { showToast('Não foi possível conectar ao servidor.'); }
+  finally { btn.disabled = false; }
+}
+
+async function triggerStop() {
+  try { await fetch('/api/pipeline/stop', { method: 'POST' }); } catch (_) {}
+}
+
+// ── Tabs ──────────────────────────────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll('.tab')  .forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === `panel-${name}`));
+  if ((name === 'input' || name === 'output') && !S.loaded[name]) {
+    loadFiles(name, '');
+    S.loaded[name] = true;
+  }
+}
+
+// ── File browser ──────────────────────────────────────────────────────────────
+function setView(side, view) {
+  S.views[side] = view;
+  const tb = document.getElementById(`panel-${side}`).querySelectorAll('.vbtn');
+  tb.forEach(b => b.classList.toggle('active',
+    (view === 'grid' && b.title === 'grade') ||
+    (view === 'list' && b.title === 'lista')
+  ));
+  renderFiles(side, S.entries[side]);
+}
+
+async function loadFiles(side, path) {
+  const fc = document.getElementById(`fc-${side}`);
+  fc.innerHTML = '<div class="empty"><span class="spin"></span></div>';
+  try {
+    const r   = await fetch(`/api/files?root=${side}&path=${encodeURIComponent(path)}`);
+    const d   = await r.json();
+    S.entries[side] = d.entries;
+    renderBreadcrumb(side, path);
+    renderFiles(side, d.entries);
+    const n = d.entries.filter(e => !e.is_dir).length;
+    document.getElementById(`tb-${side}`).textContent = n;
+  } catch (err) {
+    fc.innerHTML = `<div class="empty"><div class="empty-txt">Erro: ${esc(err.message)}</div></div>`;
+  }
+}
+
+function renderBreadcrumb(side, path) {
+  const bc    = document.getElementById(`bc-${side}`);
+  bc.innerHTML = '';
+  const parts = path ? path.split('/').filter(Boolean) : [];
+
+  const root = mk('span', 'bci' + (parts.length ? '' : ' cur'));
+  root.textContent = side === 'input' ? '📥 Origem' : '📤 Destino';
+  if (parts.length) root.onclick = () => loadFiles(side, '');
+  bc.appendChild(root);
+
+  parts.forEach((part, i) => {
+    const sep = mk('span', 'bcsep'); sep.textContent = '›';
+    bc.appendChild(sep);
+    const item = mk('span', 'bci' + (i === parts.length - 1 ? ' cur' : ''));
+    item.textContent = part; item.title = part;
+    if (i < parts.length - 1) {
+      const tp = parts.slice(0, i + 1).join('/');
+      item.onclick = () => loadFiles(side, tp);
+    }
+    bc.appendChild(item);
+  });
+}
+
+function renderFiles(side, entries) {
+  const fc = document.getElementById(`fc-${side}`);
+  fc.innerHTML = '';
+  if (!entries.length) {
+    fc.innerHTML = '<div class="empty"><div class="empty-ico">📂</div><div class="empty-txt">Pasta vazia</div></div>';
+    return;
+  }
+  const wrap = mk('div', S.views[side] === 'grid' ? 'fgrid' : 'flist');
+  entries.forEach(e => wrap.appendChild(S.views[side] === 'grid' ? gridCard(side, e) : listItem(side, e)));
+  fc.appendChild(wrap);
+  lazyThumbs(side);
+}
+
+function gridCard(side, e) {
+  const card = mk('div', 'fcard');
+  if (e.is_dir) {
+    card.innerHTML = `<div class="ficon">📁</div><span class="fname">${esc(e.name)}</span>`;
+    card.onclick = () => loadFiles(side, e.path);
+  } else if (e.is_image) {
+    card.innerHTML = `
+      <img class="fthumb" data-src="/api/thumbnail?root=${side}&path=${encodeURIComponent(e.path)}&size=200"
+           alt="${esc(e.name)}" onerror="imgFallback(this)">
+      <div class="ficon" style="display:none">🖼</div>
+      <span class="fname">${esc(e.name)}</span>
+      <span class="fmeta">${fmtSz(e.size)}</span>`;
+    card.onclick = () => openLightbox(side, e);
+  } else {
+    card.innerHTML = `
+      <div class="ficon">${fileIco(e.ext, e.is_video)}</div>
+      <span class="fname">${esc(e.name)}</span>
+      <span class="fmeta">${fmtSz(e.size)}</span>`;
+  }
+  return card;
+}
+
+function listItem(side, e) {
+  const item = mk('div', 'fli');
+  const ico  = e.is_dir ? '📁' : (e.is_image ? '🖼' : fileIco(e.ext, e.is_video));
+  item.innerHTML = `
+    <span class="fli-ico">${ico}</span>
+    <span class="fli-name">${esc(e.name)}</span>
+    <span class="fli-sz">${e.size != null ? fmtSz(e.size) : ''}</span>
+    <span class="fli-ext">${e.ext || (e.is_dir ? 'pasta' : '')}</span>`;
+  if (e.is_dir)   item.onclick = () => loadFiles(side, e.path);
+  if (e.is_image) item.onclick = () => openLightbox(side, e);
+  return item;
+}
+
+function imgFallback(img) {
+  img.style.display = 'none';
+  const fb = img.parentElement?.querySelector('.ficon');
+  if (fb) fb.style.display = 'grid';
+}
+
+function lazyThumbs(side) {
+  const imgs = document.querySelectorAll(`#fc-${side} img[data-src]`);
+  if (!imgs.length) return;
+  const obs = new IntersectionObserver((entries, o) => {
+    entries.forEach(e => {
+      if (!e.isIntersecting) return;
+      const img = e.target;
+      img.src = img.dataset.src;
+      img.removeAttribute('data-src');
+      o.unobserve(img);
+    });
+  }, { rootMargin: '120px' });
+  imgs.forEach(img => obs.observe(img));
+}
+
+// ── Lightbox ──────────────────────────────────────────────────────────────────
+const LB = { side: '', imgs: [], idx: 0, open: false };
+
+function openLightbox(side, entry) {
+  // Coleta todas as imagens da listagem atual para navegar entre elas
+  LB.side = side;
+  LB.imgs = S.entries[side].filter(e => e.is_image);
+  LB.idx  = LB.imgs.findIndex(e => e.path === entry.path);
+  if (LB.idx < 0) LB.idx = 0;
+  LB.open = true;
+
+  const lb = document.getElementById('lightbox');
+  lb.classList.add('open');
+  lb.focus();
+  _lbLoad();
+}
+
+function closeLightbox() {
+  LB.open = false;
+  const lb = document.getElementById('lightbox');
+  lb.classList.remove('open');
+  document.getElementById('lb-img').src = '';
+}
+
+function lbStep(dir) {
+  const next = LB.idx + dir;
+  if (next < 0 || next >= LB.imgs.length) return;
+  LB.idx = next;
+  _lbLoad();
+}
+
+function _lbLoad() {
+  const e   = LB.imgs[LB.idx];
+  const img = document.getElementById('lb-img');
+  const sp  = document.getElementById('lb-spinner');
+
+  // Header
+  document.getElementById('lb-name').textContent = e.name;
+  document.getElementById('lb-meta').textContent =
+    (e.size != null ? fmtSz(e.size) + ' · ' : '') + e.ext.toUpperCase().replace('.','');
+  document.getElementById('lb-counter').textContent = `${LB.idx + 1} / ${LB.imgs.length}`;
+
+  // Botões de navegação
+  document.getElementById('lb-prev').disabled    = LB.idx === 0;
+  document.getElementById('lb-next').disabled    = LB.idx === LB.imgs.length - 1;
+  document.getElementById('lb-arr-l').disabled   = LB.idx === 0;
+  document.getElementById('lb-arr-r').disabled   = LB.idx === LB.imgs.length - 1;
+
+  // Spinner + loading state
+  img.classList.add('loading');
+  sp.classList.add('show');
+
+  // Carrega imagem em tamanho real através de thumbnail de alta res (size=2000 ≈ full)
+  img.src = `/api/thumbnail?root=${LB.side}&path=${encodeURIComponent(e.path)}&size=2000`;
+}
+
+function lbImgLoaded() {
+  document.getElementById('lb-img').classList.remove('loading');
+  document.getElementById('lb-spinner').classList.remove('show');
+}
+
+function lbImgError() {
+  document.getElementById('lb-spinner').classList.remove('show');
+  document.getElementById('lb-img').classList.remove('loading');
+  document.getElementById('lb-img').alt = '⚠ Não foi possível carregar a imagem';
+}
+
+// Teclado: Esc fecha lightbox ou modal de cleanup; ← / → navega
+document.addEventListener('keydown', (ev) => {
+  if (LB.open) {
+    if (ev.key === 'Escape')       { closeLightbox(); ev.preventDefault(); }
+    else if (ev.key === 'ArrowLeft')  { lbStep(-1); ev.preventDefault(); }
+    else if (ev.key === 'ArrowRight') { lbStep(1);  ev.preventDefault(); }
+  } else if (ev.key === 'Escape') {
+    const overlay = document.getElementById('cleanup-overlay');
+    if (!overlay.classList.contains('hidden') && !CL.running) {
+      closeCleanupModal(); ev.preventDefault();
+    }
+  }
+});
+
+// Swipe touch (mobile)
+let _lbTX = 0;
+document.getElementById('lightbox').addEventListener('touchstart', (ev) => {
+  _lbTX = ev.touches[0].clientX;
+}, { passive: true });
+document.getElementById('lightbox').addEventListener('touchend', (ev) => {
+  if (!LB.open) return;
+  const dx = ev.changedTouches[0].clientX - _lbTX;
+  if (Math.abs(dx) > 50) lbStep(dx < 0 ? 1 : -1);
+}, { passive: true });
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+function mk(tag, cls) {
+  const el = document.createElement(tag);
+  if (cls) el.className = cls;
+  return el;
+}
+
+function esc(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function fmtSz(b) {
+  if (b == null) return '';
+  if (b < 1024)       return `${b} B`;
+  if (b < 1048576)    return `${(b/1024).toFixed(1)} KB`;
+  if (b < 1073741824) return `${(b/1048576).toFixed(1)} MB`;
+  return `${(b/1073741824).toFixed(2)} GB`;
+}
+
+function fileIco(ext, isVideo) {
+  if (isVideo) return '🎬';
+  const m = {
+    '.pdf':'📄','.txt':'📝','.db':'🗄','.csv':'📊',
+    '.json':'{}','.yaml':'⚙','.yml':'⚙','.log':'📋',
+    '.zip':'📦','.tar':'📦','.gz':'📦','.xmp':'🏷',
+  };
+  return m[ext] ?? '📄';
+}
+
+let toastTimer = null;
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.display = 'block';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.style.display = 'none'; }, 3500);
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+(async () => {
+  try {
+    const r = await fetch('/api/status');
+    onStatus(await r.json());
+  } catch(_) {}
+  loadStats();
+  connectSSE();
+})();
+</script>
+</body>
+</html>

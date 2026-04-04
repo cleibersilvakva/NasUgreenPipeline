@@ -1,0 +1,38 @@
+# Dependências e ambiente local
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Testes
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Documentação
+*.md
+!README.md
+
+# Configs locais (o correto é montar via volume)
+config.yaml
+config.example.yaml
+
+# Artefatos de IDE e macOS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+
+# Locks de execução local
+*.lock

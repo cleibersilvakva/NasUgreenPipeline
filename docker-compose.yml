@@ -1,0 +1,27 @@
+services:
+  nasugreen:
+    image: cleibersilva/nasugreen:4.0.8
+    container_name: nasugreen
+    restart: unless-stopped
+
+    ports:
+      - "9090:9090"   # Dashboard web acessível em http://IP-DO-NAS:9090
+
+    volumes:
+      # Pasta de ENTRADA no NAS → /input dentro do container (somente-leitura)
+      - ./input:/input:ro
+
+      # Pasta de SAÍDA no NAS → /output dentro do container (leitura e escrita)
+      - ./output:/output
+
+      # Arquivo de configuração
+      - ./config.docker.yaml:/config/config.yaml:ro
+
+    environment:
+      - TZ=America/Sao_Paulo
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
