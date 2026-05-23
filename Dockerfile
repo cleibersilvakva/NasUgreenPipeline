@@ -19,7 +19,7 @@ FROM python:3.11-slim
 
 # Metadados da imagem
 LABEL org.opencontainers.image.title="Media Repository Pipeline"
-LABEL org.opencontainers.image.version="4.2.4"
+LABEL org.opencontainers.image.version="4.3.0"
 LABEL org.opencontainers.image.description="Pipeline de ingestão e organização de mídia para NAS"
 
 # Sem dependências apt — metadata extraído via Pillow e mutagen (Python puro)

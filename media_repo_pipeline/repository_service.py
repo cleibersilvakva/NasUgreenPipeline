@@ -46,26 +46,42 @@ def ensure_repository(
         # Reativar se estava inativo
         if existing.status == REPO_STATUS_INACTIVE:
             logger.info("Reativando repositório '%s' (canonical: %s).", display, canonical)
+
+        # Auto-migração: repos de bancos antigos (sem output_root_path) recebem o default
+        if not existing.output_root_path:
+            default_path = str(cfg.output_root / DIR_ORGANIZED / canonical)
+            logger.info(
+                "Repositório '%s' migrado: output_root_path definido como '%s'.",
+                canonical, default_path,
+            )
+            db.set_repository_output_root(canonical, default_path)
+            existing.output_root_path = default_path
+
         existing.status = REPO_STATUS_ACTIVE
         existing.is_source_present = True
         existing.display_name = display
         existing.last_source_root_path = str(source_path)
         db.upsert_repository(existing)
-        _ensure_directory_structure(canonical, cfg)
+        _ensure_directory_structure(canonical, cfg, existing.output_root_path)
         return existing
 
-    # Novo repositório
-    logger.info("Novo repositório descoberto: '%s' (canonical: %s).", display, canonical)
+    # Novo repositório — aguarda configuração de destino pelo usuário
+    logger.info(
+        "Novo repositório descoberto: '%s' (canonical: %s). "
+        "Aguardando configuração de pasta de destino no dashboard.",
+        display, canonical,
+    )
     repo = RepositoryRecord(
         repository_name_canonical=canonical,
         display_name=display,
         status=REPO_STATUS_ACTIVE,
         is_source_present=True,
         last_source_root_path=str(source_path),
+        output_root_path="",  # pendente — sem processamento até o usuário configurar
     )
     repo_id = db.upsert_repository(repo)
     repo.id = repo_id
-    _ensure_directory_structure(canonical, cfg)
+    # Não cria estrutura de diretórios — sem caminho definido ainda
     return repo
 
 
@@ -84,12 +100,18 @@ def mark_repositories_inactive(
             db.mark_repository_inactive(repo.repository_name_canonical)
 
 
-def _ensure_directory_structure(canonical: str, cfg: PipelineConfig) -> None:
-    """Cria estrutura de diretórios do repositório no destino (idempotente)."""
+def _ensure_directory_structure(canonical: str, cfg: PipelineConfig, output_root_path: str = "") -> None:
+    """Cria estrutura de diretórios do repositório no destino (idempotente).
+
+    output_root_path define onde os arquivos organizados (kept) serão gravados.
+    Os demais diretórios (duplicates, review, corrupted, sidecars) ficam sempre
+    sob cfg.output_root.
+    """
     root = cfg.output_root
+    organized_base = Path(output_root_path) if output_root_path else root / DIR_ORGANIZED / canonical
     dirs = [
-        root / DIR_ORGANIZED / canonical / SUBDIR_PHOTOS,
-        root / DIR_ORGANIZED / canonical / SUBDIR_VIDEOS,
+        organized_base / SUBDIR_PHOTOS,
+        organized_base / SUBDIR_VIDEOS,
         root / DIR_DUPLICATES / canonical,
         root / DIR_REVIEW / canonical,
         root / DIR_CORRUPTED / canonical,

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
 from .config import PipelineConfig
@@ -19,6 +20,100 @@ from .sidecar_service import generate_sidecar
 logger = logging.getLogger("media_repo_pipeline.transaction")
 
 
+@dataclass
+class PendingWrite:
+    """Dados necessários para gravar no banco após a fase de I/O.
+
+    Produzido pelos workers e consumido exclusivamente pelo writer thread,
+    eliminando contenção de lock no SQLite em execuções multi-thread.
+    """
+
+    file_info: FileInfo
+    decision: Decision
+    dest_path: Path
+    source_path: Path
+    cfg_mode: str  # 'copy' | 'move'
+
+
+def process_file_io(
+    file_info: FileInfo,
+    decision: Decision,
+    dest_path: Path,
+    cfg: PipelineConfig,
+    tmp_suffix: str = "",
+) -> tuple[ProcessingResult, PendingWrite | None]:
+    """Fase de I/O: copia, valida, renomeia e gera sidecar. NÃO toca o banco.
+
+    Retorna (result, pending). pending é None se houve falha — nenhuma escrita
+    será feita no banco para este arquivo.
+    """
+    result = ProcessingResult(file_info=file_info, decision=decision)
+    tmp_dir = cfg.tmp_dir
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    source = Path(file_info.source_path)
+    tmp_name = f"{dest_path.stem}_{tmp_suffix}{dest_path.suffix}" if tmp_suffix else dest_path.name
+    tmp_path = tmp_dir / tmp_name
+    renamed = False
+
+    try:
+        _safe_copy(source, tmp_path)
+        _validate_copy(source, tmp_path, file_info)
+
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(str(tmp_path), str(dest_path))
+        renamed = True
+        logger.debug("Arquivo movido para destino final: %s", dest_path)
+
+        if decision.action == STATUS_KEPT and cfg.sidecar_enabled:
+            generate_sidecar(file_info, dest_path, cfg)
+
+        pending = PendingWrite(
+            file_info=file_info,
+            decision=decision,
+            dest_path=dest_path,
+            source_path=source,
+            cfg_mode=cfg.mode,
+        )
+        return result, pending
+
+    except (CopyError, ValidationError, SidecarError) as exc:
+        result.success = False
+        result.error_message = str(exc)
+        result.error_type = type(exc).__name__
+        logger.error("✗ Falha ao processar %s: %s", source, exc)
+        _cleanup_tmp(dest_path if renamed else tmp_path)
+        return result, None
+
+    except Exception as exc:
+        result.success = False
+        result.error_message = str(exc)
+        result.error_type = "UnexpectedError"
+        logger.error("✗ Erro inesperado ao processar %s: %s", source, exc)
+        _cleanup_tmp(dest_path if renamed else tmp_path)
+        return result, None
+
+
+def commit_pending_write(pending: PendingWrite, db: Database) -> None:
+    """Grava no banco e faz unlink da origem se mode=move.
+
+    Sempre chamado pelo writer thread (single-threaded) — zero contenção de lock.
+    """
+    _record_to_db(pending.file_info, pending.decision, pending.dest_path, db)
+
+    if pending.cfg_mode == "move":
+        try:
+            pending.source_path.unlink()
+            logger.debug("Origem removida (mode=move): %s", pending.source_path)
+        except OSError as exc:
+            logger.warning("Não foi possível remover origem: %s — %s", pending.source_path, exc)
+
+    logger.info(
+        "✓ [%s] %s → %s",
+        pending.decision.action, pending.file_info.rel_input_path, pending.dest_path,
+    )
+
+
 def process_file(
     file_info: FileInfo,
     decision: Decision,
@@ -27,89 +122,20 @@ def process_file(
     cfg: PipelineConfig,
     tmp_suffix: str = "",
 ) -> ProcessingResult:
-    """Executa a transação lógica completa para um arquivo.
+    """Versão completa (I/O + DB) para retrocompatibilidade com testes e CLI.
 
-    Fluxo:
-    1. Copiar origem para tmp/
-    2. Validar tamanho (e hash se kept)
-    3. Rename atômico para destino final
-    4. Gerar sidecar (se kept e habilitado)
-    5. Gravar no banco
-    6. Se mode=move, remover origem após sucesso completo
-
-    `tmp_suffix` é um sufixo único por thread para evitar colisões no
-    diretório tmp quando workers_count > 1.
-
-    Retorna ProcessingResult.
+    Em produção prefer process_file_io + commit_pending_write separados.
     """
-    result = ProcessingResult(file_info=file_info, decision=decision)
-    tmp_dir = cfg.tmp_dir
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-
-    source = Path(file_info.source_path)
-    # Constrói nome tmp único: stem_suffix.ext (evita colisão entre threads)
-    if tmp_suffix:
-        tmp_name = f"{dest_path.stem}_{tmp_suffix}{dest_path.suffix}"
-    else:
-        tmp_name = dest_path.name
-    tmp_path = tmp_dir / tmp_name
-    renamed = False  # rastreia se o rename já ocorreu
-
-    try:
-        # 1. Copiar para tmp
-        _safe_copy(source, tmp_path)
-
-        # 2. Validar integridade
-        _validate_copy(source, tmp_path, file_info)
-
-        # 3. Rename atômico para destino final
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
-        os.rename(str(tmp_path), str(dest_path))
-        renamed = True
-        logger.debug("Arquivo movido para destino final: %s", dest_path)
-
-        # 4. Sidecar (apenas para kept)
-        sidecar_path = None
-        if decision.action == STATUS_KEPT and cfg.sidecar_enabled:
-            sidecar_path = generate_sidecar(file_info, dest_path, cfg)
-
-        # 5. Gravar no banco
-        _record_to_db(file_info, decision, dest_path, db)
-
-        # 6. Se mode=move, remover origem
-        if cfg.mode == "move":
-            try:
-                source.unlink()
-                logger.debug("Origem removida (mode=move): %s", source)
-            except OSError as exc:
-                logger.warning("Não foi possível remover origem: %s — %s", source, exc)
-
-        result.success = True
-        logger.info(
-            "✓ [%s] %s → %s",
-            decision.action, file_info.rel_input_path, dest_path,
-        )
-
-    except (CopyError, ValidationError, SidecarError) as exc:
-        result.success = False
-        result.error_message = str(exc)
-        result.error_type = type(exc).__name__
-        logger.error("✗ Falha ao processar %s: %s", source, exc)
-        if renamed:
-            _cleanup_tmp(dest_path)
-        else:
-            _cleanup_tmp(tmp_path)
-
-    except Exception as exc:
-        result.success = False
-        result.error_message = str(exc)
-        result.error_type = "UnexpectedError"
-        logger.error("✗ Erro inesperado ao processar %s: %s", source, exc)
-        if renamed:
-            _cleanup_tmp(dest_path)
-        else:
-            _cleanup_tmp(tmp_path)
-
+    result, pending = process_file_io(file_info, decision, dest_path, cfg, tmp_suffix)
+    if pending is not None:
+        try:
+            commit_pending_write(pending, db)
+            result.success = True
+        except Exception as exc:
+            result.success = False
+            result.error_message = str(exc)
+            result.error_type = "DBWriteError"
+            logger.error("✗ Falha na escrita ao banco para %s: %s", file_info.source_path, exc)
     return result
 
 

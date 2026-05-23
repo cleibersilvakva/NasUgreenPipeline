@@ -418,6 +418,68 @@ def _http(host: str, port: int, method: str, path: str) -> tuple[int, bytes]:
     return resp.status, body
 
 
+def _http_json(
+    host: str, port: int, method: str, path: str, payload: dict
+) -> tuple[int, bytes]:
+    body = json.dumps(payload).encode()
+    conn = http.client.HTTPConnection(host, port, timeout=5)
+    conn.request(method, path, body=body, headers={"Content-Type": "application/json"})
+    resp = conn.getresponse()
+    data = resp.read()
+    conn.close()
+    return resp.status, data
+
+
+def _make_repo_db(db_path: Path, repos: list[dict]) -> None:
+    """Cria um SQLite mínimo com a tabela repositories populada."""
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS repositories (
+            id INTEGER PRIMARY KEY,
+            repository_name_canonical TEXT UNIQUE,
+            display_name TEXT,
+            status TEXT DEFAULT 'active',
+            output_root_path TEXT,
+            is_source_present INTEGER DEFAULT 1,
+            last_source_root_path TEXT DEFAULT '',
+            first_seen_at TEXT DEFAULT '',
+            last_seen_at TEXT DEFAULT '',
+            created_at TEXT DEFAULT '',
+            updated_at TEXT DEFAULT ''
+        )"""
+    )
+    for r in repos:
+        conn.execute(
+            "INSERT INTO repositories (repository_name_canonical, display_name, status, output_root_path) VALUES (?,?,?,?)",
+            (r["canonical"], r.get("display_name", r["canonical"]), r.get("status", "active"), r.get("output_root_path") or None),
+        )
+    conn.commit()
+    conn.close()
+
+
+@pytest.fixture
+def server_with_db(tmp_path: Path):
+    """Servidor HTTP com config apontando para um DB populado."""
+    db_dir = tmp_path / "output" / "db"
+    db_dir.mkdir(parents=True)
+    db_path = db_dir / "index.db"
+
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        f"input_root: entrada\noutput_root: {tmp_path / 'output'}\n",
+        encoding="utf-8",
+    )
+    srv._CONFIG_PATH = cfg_file
+
+    server = srv._ThreadedHTTPServer(("127.0.0.1", 0), srv.Handler)
+    port = server.server_address[1]
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    yield "127.0.0.1", port, db_path
+    server.shutdown()
+    t.join(timeout=5)
+
+
 class TestHttpIntegration:
     def test_get_root_returns_html(self, running_server: tuple[str, int]) -> None:
         host, port = running_server
@@ -523,3 +585,172 @@ class TestHttpIntegration:
         finally:
             server.shutdown()
             t.join(timeout=5)
+
+
+# ── _api_repositories (unit) ──────────────────────────────────────────────────
+
+
+class TestApiRepositoriesUnit:
+    def test_no_db_returns_empty_list(self, tmp_path: Path) -> None:
+        with mock.patch.object(srv, "_get_db_path", return_value=tmp_path / "missing.db"):
+            code, data = srv._api_repositories()
+        assert code == 200
+        assert data == {"repositories": []}
+
+    def test_pending_repo_has_pending_config_true(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "index.db"
+        _make_repo_db(db_path, [{"canonical": "maria", "output_root_path": None}])
+        with mock.patch.object(srv, "_get_db_path", return_value=db_path):
+            code, data = srv._api_repositories()
+        assert code == 200
+        repos = data["repositories"]
+        assert len(repos) == 1
+        assert repos[0]["canonical"] == "maria"
+        assert repos[0]["pending_config"] is True
+        assert repos[0]["output_root_path"] == ""
+
+    def test_configured_repo_has_pending_config_false(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "index.db"
+        _make_repo_db(db_path, [{"canonical": "joao", "output_root_path": "/output/joao"}])
+        with mock.patch.object(srv, "_get_db_path", return_value=db_path):
+            code, data = srv._api_repositories()
+        repos = data["repositories"]
+        assert repos[0]["pending_config"] is False
+        assert repos[0]["output_root_path"] == "/output/joao"
+
+    def test_multiple_repos_mixed(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "index.db"
+        _make_repo_db(db_path, [
+            {"canonical": "a", "output_root_path": "/out/a"},
+            {"canonical": "b", "output_root_path": None},
+        ])
+        with mock.patch.object(srv, "_get_db_path", return_value=db_path):
+            _, data = srv._api_repositories()
+        by_canonical = {r["canonical"]: r for r in data["repositories"]}
+        assert by_canonical["a"]["pending_config"] is False
+        assert by_canonical["b"]["pending_config"] is True
+
+
+# ── _api_set_repo_output_root (unit) ──────────────────────────────────────────
+
+
+class TestApiSetRepoOutputRootUnit:
+    def test_empty_path_returns_400(self, tmp_path: Path) -> None:
+        code, data = srv._api_set_repo_output_root("maria", {"output_root_path": ""})
+        assert code == 400
+        assert "error" in data
+
+    def test_missing_key_returns_400(self) -> None:
+        code, data = srv._api_set_repo_output_root("maria", {})
+        assert code == 400
+
+    def test_relative_path_returns_400(self) -> None:
+        code, data = srv._api_set_repo_output_root("maria", {"output_root_path": "relativo/caminho"})
+        assert code == 400
+        assert "absoluto" in data["error"].lower()
+
+    def test_no_db_returns_500(self, tmp_path: Path) -> None:
+        abs_path = str(tmp_path / "destino")
+        with mock.patch.object(srv, "_get_db_path", return_value=None):
+            code, data = srv._api_set_repo_output_root("maria", {"output_root_path": abs_path})
+        assert code == 500
+
+    def test_unknown_canonical_returns_404(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "index.db"
+        _make_repo_db(db_path, [])
+        abs_path = str(tmp_path / "destino")
+        with mock.patch.object(srv, "_get_db_path", return_value=db_path):
+            code, data = srv._api_set_repo_output_root("naoexiste", {"output_root_path": abs_path})
+        assert code == 404
+
+    def test_valid_call_creates_dirs_and_returns_200(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "index.db"
+        _make_repo_db(db_path, [{"canonical": "maria", "output_root_path": None}])
+        dest = tmp_path / "maria-album"
+        with mock.patch.object(srv, "_get_db_path", return_value=db_path):
+            code, data = srv._api_set_repo_output_root("maria", {"output_root_path": str(dest)})
+        assert code == 200
+        assert data["ok"] is True
+        assert (dest / "photos").is_dir()
+        assert (dest / "videos").is_dir()
+
+    def test_valid_call_persists_to_db(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "index.db"
+        _make_repo_db(db_path, [{"canonical": "joao", "output_root_path": None}])
+        dest = str(tmp_path / "joao-fotos")
+        with mock.patch.object(srv, "_get_db_path", return_value=db_path):
+            srv._api_set_repo_output_root("joao", {"output_root_path": dest})
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT output_root_path FROM repositories WHERE repository_name_canonical = 'joao'"
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row[0] == dest
+
+
+# ── /api/repositories HTTP integration ────────────────────────────────────────
+
+
+class TestApiRepositoriesHttp:
+    def test_get_repositories_returns_json(self, server_with_db) -> None:
+        host, port, db_path = server_with_db
+        _make_repo_db(db_path, [{"canonical": "pedro", "output_root_path": None}])
+        status, body = _http(host, port, "GET", "/api/repositories")
+        assert status == 200
+        data = json.loads(body)
+        assert "repositories" in data
+
+    def test_get_repositories_no_db_returns_empty(self, server_with_db) -> None:
+        host, port, db_path = server_with_db
+        # Não cria o DB — deve retornar lista vazia
+        status, body = _http(host, port, "GET", "/api/repositories")
+        assert status == 200
+        data = json.loads(body)
+        assert data["repositories"] == []
+
+    def test_post_output_root_valid(self, server_with_db, tmp_path: Path) -> None:
+        host, port, db_path = server_with_db
+        _make_repo_db(db_path, [{"canonical": "beatriz", "output_root_path": None}])
+        dest = str(tmp_path / "beatriz-album")
+        status, body = _http_json(
+            host, port, "POST",
+            "/api/repositories/beatriz/output-root",
+            {"output_root_path": dest},
+        )
+        assert status == 200
+        data = json.loads(body)
+        assert data["ok"] is True
+
+    def test_post_output_root_empty_body_returns_400(self, server_with_db) -> None:
+        host, port, _ = server_with_db
+        status, body = _http_json(
+            host, port, "POST",
+            "/api/repositories/alguem/output-root",
+            {"output_root_path": ""},
+        )
+        assert status == 400
+
+    def test_post_output_root_relative_returns_400(self, server_with_db) -> None:
+        host, port, _ = server_with_db
+        status, body = _http_json(
+            host, port, "POST",
+            "/api/repositories/alguem/output-root",
+            {"output_root_path": "relativo/path"},
+        )
+        assert status == 400
+
+    def test_post_output_root_unknown_repo_returns_404(self, server_with_db, tmp_path: Path) -> None:
+        host, port, db_path = server_with_db
+        _make_repo_db(db_path, [])
+        status, body = _http_json(
+            host, port, "POST",
+            "/api/repositories/fantasma/output-root",
+            {"output_root_path": str(tmp_path / "destino")},
+        )
+        assert status == 404
+
+    def test_post_malformed_url_returns_404(self, server_with_db) -> None:
+        host, port, _ = server_with_db
+        status, _ = _http(host, port, "POST", "/api/repositories/sem-sufixo")
+        assert status == 404

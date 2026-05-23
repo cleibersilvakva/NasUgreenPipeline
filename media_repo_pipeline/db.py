@@ -133,6 +133,12 @@ class Database:
         )
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA_SQL)
+        # Migration: adiciona coluna output_root_path em bancos existentes
+        try:
+            self._conn.execute("ALTER TABLE repositories ADD COLUMN output_root_path TEXT")
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            pass  # coluna já existe
 
     def close(self) -> None:
         if self._conn:
@@ -161,6 +167,7 @@ class Database:
     def _row_to_repository(row) -> RepositoryRecord:
         d = dict(row)
         d["is_source_present"] = bool(d.get("is_source_present", 1))
+        d["output_root_path"] = d.get("output_root_path") or ""
         return RepositoryRecord(**d)
 
     def get_repository(self, canonical_name: str) -> RepositoryRecord | None:
@@ -201,8 +208,9 @@ class Database:
                 cur.execute(
                     """INSERT INTO repositories
                        (repository_name_canonical, display_name, first_seen_at, last_seen_at,
-                        status, is_source_present, last_source_root_path, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        status, is_source_present, last_source_root_path, created_at, updated_at,
+                        output_root_path)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         repo.repository_name_canonical,
                         repo.display_name,
@@ -211,9 +219,21 @@ class Database:
                         int(repo.is_source_present),
                         repo.last_source_root_path,
                         now, now,
+                        repo.output_root_path or None,
                     ),
                 )
                 return cur.lastrowid  # type: ignore[return-value]
+
+    def set_repository_output_root(self, canonical_name: str, output_root_path: str) -> None:
+        """Define a pasta de destino dos arquivos organizados de um repositório."""
+        now = _now_iso()
+        with self.transaction() as cur:
+            cur.execute(
+                """UPDATE repositories
+                   SET output_root_path = ?, updated_at = ?
+                 WHERE repository_name_canonical = ?""",
+                (output_root_path or None, now, canonical_name),
+            )
 
     def mark_repository_inactive(self, canonical_name: str) -> None:
         now = _now_iso()

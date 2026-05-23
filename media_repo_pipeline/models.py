@@ -20,6 +20,7 @@ class RepositoryRecord:
     last_source_root_path: str = ""
     created_at: str = ""
     updated_at: str = ""
+    output_root_path: str = ""  # pasta raiz de destino dos arquivos organizados (vazio = aguardando config)
 
 
 @dataclass

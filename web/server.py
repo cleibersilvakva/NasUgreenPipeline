@@ -442,6 +442,77 @@ def _api_thumbnail(params: dict[str, str]) -> tuple[int, bytes, str]:
         return 204, b"", "text/plain"
 
 
+def _api_repositories() -> tuple[int, dict[str, Any]]:
+    """Lista todos os repositórios com status de configuração."""
+    db_path = _get_db_path()
+    if db_path is None or not db_path.exists():
+        return 200, {"repositories": []}
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=10)
+        conn.row_factory = sqlite3.Row
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(repositories)").fetchall()}
+        has_output_root = "output_root_path" in cols
+        rows = conn.execute("SELECT * FROM repositories ORDER BY display_name").fetchall()
+        conn.close()
+        repos = []
+        for row in rows:
+            d = dict(row)
+            output_root_path = (d.get("output_root_path") or "") if has_output_root else ""
+            repos.append({
+                "canonical": d["repository_name_canonical"],
+                "display_name": d["display_name"],
+                "status": d["status"],
+                "output_root_path": output_root_path,
+                "pending_config": not output_root_path,
+            })
+        return 200, {"repositories": repos}
+    except sqlite3.Error as exc:
+        return 500, {"error": str(exc)}
+
+
+def _api_set_repo_output_root(canonical: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """Define a pasta de destino de um repositório e cria sua estrutura."""
+    from datetime import datetime, timezone
+
+    path_str = (body.get("output_root_path") or "").strip()
+    if not path_str:
+        return 400, {"error": "output_root_path é obrigatório."}
+    path = Path(path_str)
+    if not path.is_absolute():
+        return 400, {"error": "O caminho deve ser absoluto (ex: /output/Maria)."}
+
+    try:
+        (path / "photos").mkdir(parents=True, exist_ok=True)
+        (path / "videos").mkdir(parents=True, exist_ok=True)
+    except (PermissionError, OSError) as exc:
+        return 500, {"error": f"Não foi possível criar o diretório: {exc}"}
+
+    db_path = _get_db_path()
+    if db_path is None:
+        return 500, {"error": "Banco não configurado."}
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        conn = sqlite3.connect(str(db_path), timeout=10)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(repositories)").fetchall()}
+        if "output_root_path" not in cols:
+            conn.close()
+            return 500, {"error": "Banco desatualizado — execute o pipeline uma vez primeiro."}
+        conn.execute(
+            "UPDATE repositories SET output_root_path = ?, updated_at = ? WHERE repository_name_canonical = ?",
+            (path_str, now, canonical),
+        )
+        conn.commit()
+        changes = conn.execute("SELECT changes()").fetchone()[0]
+        conn.close()
+        if changes == 0:
+            return 404, {"error": f"Repositório '{canonical}' não encontrado."}
+    except sqlite3.Error as exc:
+        return 500, {"error": str(exc)}
+
+    _broadcast({"type": "repo_configured", "canonical": canonical, "output_root_path": path_str})
+    return 200, {"ok": True, "canonical": canonical, "output_root_path": path_str}
+
+
 def _api_last_run() -> dict[str, Any]:
     try:
         cfg = _load_yaml()
@@ -555,6 +626,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/files":           lambda: _api_files(self._parse_qs()),
             "/api/db/last-run":     lambda: (200, _api_last_run()),
             "/api/cleanup/preview": lambda: _api_cleanup_preview(),
+            "/api/repositories":    lambda: _api_repositories(),
         }
         if p in routes_get:
             result = routes_get[p]()
@@ -577,6 +649,21 @@ class Handler(BaseHTTPRequestHandler):
         elif p == "/api/pipeline/stop":
             code, data = _api_stop()
             self._send_json(code, data)
+        elif p.startswith("/api/repositories/") and p.endswith("/output-root"):
+            parts = p.split("/")
+            # /api/repositories/<canonical>/output-root → 5 partes
+            if len(parts) == 5 and parts[4] == "output-root":
+                canonical = parts[3]
+                try:
+                    length = int(self.headers.get("Content-Length", 0))
+                    raw = self.rfile.read(length) if length else b"{}"
+                    body = json.loads(raw) if raw.strip() else {}
+                except Exception:
+                    body = {}
+                code, data = _api_set_repo_output_root(canonical, body)
+                self._send_json(code, data)
+            else:
+                self._send_json(404, {"error": "Not found"})
         elif p == "/api/cleanup/run":
             # Ler body JSON
             try:

@@ -27,7 +27,7 @@ from .reconciler import reconcile
 from .reporting import RunReport
 from .repository_service import ensure_repository, mark_repositories_inactive
 from .scanner import discover_repositories, scan_files
-from .transaction_service import process_file
+from .transaction_service import PendingWrite, commit_pending_write, process_file, process_file_io
 from .utils import canonicalize_repo_name
 
 logger: logging.Logger | None = None
@@ -123,6 +123,7 @@ def main(argv: list[str] | None = None) -> int:
 def _run_cycle(db: Database, cfg: PipelineConfig) -> None:
     """Executa um ciclo completo do scanner."""
     assert logger is not None
+    import queue as _queue_module
     import threading
     import uuid
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -145,6 +146,14 @@ def _run_cycle(db: Database, cfg: PipelineConfig) -> None:
         active_names.add(canonical)
         repo_record = ensure_repository(raw_name, source_path, db, cfg)
 
+        if not repo_record.output_root_path:
+            logger.warning(
+                "Repositório '%s' aguarda configuração de pasta de destino — "
+                "acesse o dashboard para configurar antes de executar.",
+                raw_name,
+            )
+            continue
+
         files = scan_files(source_path, cfg)
         n_files = len(files)
         with report_lock:
@@ -166,25 +175,72 @@ def _run_cycle(db: Database, cfg: PipelineConfig) -> None:
     # Snapshot de kept_files para check RAW/JPG (feito uma vez, pré-pool)
     kept_files_snapshot = db.get_all_kept_files()
 
-    # 2. Processar arquivos em paralelo com ThreadPoolExecutor
+    # 2. Writer thread — única thread que escreve no banco, zero contenção de lock.
+    #    Workers fazem I/O (cópia, hash, sidecar) em paralelo e empurram PendingWrite
+    #    para esta fila; o writer thread consome e commita serialmente.
+    _SENTINEL = object()
+    write_queue: _queue_module.Queue = _queue_module.Queue()
+
+    def _writer_thread_fn() -> None:
+        writer_db = Database(cfg.sqlite_db_path)  # type: ignore[arg-type]
+        writer_db.open()
+        writer_completed = 0
+        try:
+            while True:
+                item = write_queue.get()
+                if item is _SENTINEL:
+                    write_queue.task_done()
+                    break
+
+                result, pending = item
+                if pending is not None:
+                    try:
+                        commit_pending_write(pending, writer_db)
+                        result.success = True
+                    except Exception as exc:
+                        result.success = False
+                        result.error_message = str(exc)
+                        result.error_type = "DBWriteError"
+                        logger.error(
+                            "✗ Falha na escrita ao banco para %s: %s",
+                            pending.file_info.source_path, exc,
+                        )
+
+                with report_lock:
+                    report.add_result(result)
+                    writer_completed += 1
+                    if writer_completed % 100 == 0:
+                        s = report.stats
+                        logger.info(
+                            "  ⚙ Progresso: %d/%d | kept=%d dup=%d rev=%d err=%d",
+                            writer_completed, total_work,
+                            s.get("kept", 0), s.get("duplicate", 0),
+                            s.get("review", 0), s.get("corrupted", 0),
+                        )
+                write_queue.task_done()
+        finally:
+            writer_db.close()
+
+    writer = threading.Thread(target=_writer_thread_fn, daemon=True, name="db-writer")
+    writer.start()
+
+    # 3. Workers — apenas I/O (cópia, hash, sidecar). Leituras ao banco são ok em paralelo.
     max_workers = max(1, cfg.workers_count)
 
-    def _worker(args: tuple) -> ProcessingResult:
-        """Cada thread tem sua própria conexão ao SQLite."""
+    def _worker(args: tuple) -> tuple[ProcessingResult, PendingWrite | None]:
+        """Fase de I/O: cada thread abre conexão somente para leituras."""
         file_path, source_path, repo_record = args
-        thread_db = Database(cfg.sqlite_db_path)   # type: ignore[arg-type]
+        thread_db = Database(cfg.sqlite_db_path)  # type: ignore[arg-type]
         thread_db.open()
-        # UUID garante que cada thread usa um tmp único (evita colisões)
         thread_tmp_suffix = uuid.uuid4().hex[:8]
         try:
-            return _process_single_file(
+            return _process_single_file_io(
                 file_path, source_path, repo_record,
                 thread_db, cfg, kept_files_snapshot, thread_tmp_suffix,
             )
         finally:
             thread_db.close()
 
-    completed = 0
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(_worker, item): item[0]
@@ -196,29 +252,24 @@ def _run_cycle(db: Database, cfg: PipelineConfig) -> None:
                 executor.shutdown(wait=False, cancel_futures=True)
                 break
             try:
-                result = future.result()
-                with report_lock:
-                    report.add_result(result)
-                    completed += 1
-                    if completed % 100 == 0:
-                        s = report.stats
-                        logger.info(
-                            "  ⚙ Progresso: %d/%d | kept=%d dup=%d rev=%d err=%d",
-                            completed, total_work,
-                            s.get("kept", 0), s.get("duplicate", 0),
-                            s.get("review", 0), s.get("corrupted", 0),
-                        )
+                result, pending = future.result()
+                write_queue.put((result, pending))
             except Exception as exc:
                 fp = futures[future]
                 logger.error("Erro inesperado em thread para %s: %s", fp, exc, exc_info=True)
 
-    # 3. Marcar repos ausentes como inativo
+    # Aguarda o writer terminar todos os commits antes de prosseguir
+    write_queue.put(_SENTINEL)
+    write_queue.join()
+    writer.join()
+
+    # 4. Marcar repos ausentes como inativo
     mark_repositories_inactive(active_names, db)
 
-    # 4. Fechar run
+    # 5. Fechar run
     db.finish_run(run_id, report.stats)
 
-    # 5. Gerar CSV e resumo
+    # 6. Gerar CSV e resumo
     report.generate_csv()
     disk_check = report.verify_disk_count()
     if not disk_check["ok"]:
@@ -233,7 +284,7 @@ def _run_cycle(db: Database, cfg: PipelineConfig) -> None:
     logger.info("\n%s", summary)
 
 
-def _process_single_file(
+def _process_single_file_io(
     file_path: Path,
     repo_source_path: Path,
     repo_record,
@@ -241,14 +292,12 @@ def _process_single_file(
     cfg: PipelineConfig,
     kept_files_snapshot: list,
     tmp_suffix: str = "",
-) -> ProcessingResult:
-    """Processa um único arquivo — pipeline completo.
+) -> tuple[ProcessingResult, PendingWrite | None]:
+    """Fase de I/O de um único arquivo — lógica + cópia + sidecar. Não grava no banco.
 
-    Thread-safe: cada thread deve usar sua própria `db` connection.
-    `kept_files_snapshot` é uma lista pré-capturada antes do pool para
-    evitar leituras concorrentes desnecessárias.
-    `tmp_suffix` é um identificador único por thread para evitar colisões
-    no diretório tmp quando workers_count > 1.
+    db é usado exclusivamente para leituras (source_state, kept_files).
+    Retorna (result, pending): pending=None se não há escrita necessária
+    (skip, erro de I/O, dry_run).
     """
     assert logger is not None
     canonical = repo_record.repository_name_canonical
@@ -258,7 +307,7 @@ def _process_single_file(
         st = file_path.stat()
     except OSError as exc:
         logger.warning("Não foi possível acessar %s: %s", file_path, exc)
-        return ProcessingResult(success=False, error_message=str(exc), error_type="OSError")
+        return ProcessingResult(success=False, error_message=str(exc), error_type="OSError"), None
 
     ext = file_path.suffix.lower()
     rel_input = str(file_path.relative_to(repo_source_path))
@@ -280,16 +329,16 @@ def _process_single_file(
         return ProcessingResult(
             success=True, file_info=fi,
             decision=Decision(action=STATUS_SKIPPED, reason="Extensão não suportada"),
-        )
+        ), None
 
-    # 2. Verificar source_state — arquivo inalterado?
+    # 2. Verificar source_state — arquivo inalterado? (leitura ok em paralelo)
     ss = db.get_source_state(str(file_path))
     if ss and ss["size_bytes"] == fi.size_bytes and ss["mtime_epoch"] == fi.mtime_epoch:
         if ss["last_status"] not in (STATUS_ERROR,):
             return ProcessingResult(
                 success=True, file_info=fi,
                 decision=Decision(action=STATUS_SKIPPED, reason="Inalterado desde última execução"),
-            )
+            ), None
 
     # 3. Estabilidade
     if not cfg.dry_run and not is_file_stable(file_path, cfg):
@@ -297,7 +346,7 @@ def _process_single_file(
         return ProcessingResult(
             success=False, file_info=fi,
             error_message="Arquivo instável", error_type="FileStabilityError",
-        )
+        ), None
 
     # 4. Classificar mídia
     fi.media_kind = classify_media_kind(ext)
@@ -314,7 +363,6 @@ def _process_single_file(
         fi.metadata_json = meta["metadata_json"]
     except Exception as exc:
         logger.warning("Falha de metadata para %s: %s", file_path, exc)
-        # Continua sem metadata — não é erro fatal
 
     # 6. Calcular hash
     try:
@@ -324,33 +372,29 @@ def _process_single_file(
         return ProcessingResult(
             success=False, file_info=fi,
             error_message=str(exc), error_type="HashComputationError",
-        )
+        ), None
 
     # 7. Nome normalizado
     fi.base_name_normalized = file_path.stem
 
-    # 8. Deduplicação
+    # 8. Deduplicação — leitura ok em paralelo (kept_files é imutável no ciclo)
     dup_ref = find_duplicate(canonical, fi.hash_sha256, db)
     is_dup = dup_ref is not None
 
-    # 9. RAW/JPG — usa snapshot pré-calculado (thread-safe, sem leitura adicional ao db)
+    # 9. RAW/JPG — snapshot pré-calculado, thread-safe
     raw_decision = check_raw_jpg_conflict(fi, kept_files_snapshot)
-    if raw_decision:
-        decision = raw_decision
-    else:
-        decision = decide(fi, is_dup, dup_ref)
+    decision = raw_decision if raw_decision else decide(fi, is_dup, dup_ref)
 
     # 10. Construir caminho de destino
-    dest_path = build_destination(fi, decision, cfg)
+    dest_path = build_destination(fi, decision, cfg, repo_output_root=repo_record.output_root_path)
 
-    # 11. Dry-run?
+    # 11. Dry-run → sem I/O, sem DB
     if cfg.dry_run:
         logger.info("[DRY-RUN] %s → %s (%s)", fi.rel_input_path, dest_path, decision.action)
-        return ProcessingResult(success=True, file_info=fi, decision=decision)
+        return ProcessingResult(success=True, file_info=fi, decision=decision), None
 
-    # 12. Transação (tmp_suffix garante unicidade do arquivo tmp por thread)
-    result = process_file(fi, decision, dest_path, db, cfg, tmp_suffix=tmp_suffix)
-    return result
+    # 12. Fase de I/O (cópia, validate, rename, sidecar) — sem DB
+    return process_file_io(fi, decision, dest_path, cfg, tmp_suffix=tmp_suffix)
 
 
 

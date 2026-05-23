@@ -35,8 +35,14 @@ def build_destination(
     file_info: FileInfo,
     decision: Decision,
     cfg: PipelineConfig,
+    repo_output_root: str = "",
 ) -> Path:
-    """Constrói o caminho absoluto final para o arquivo."""
+    """Constrói o caminho absoluto final para o arquivo.
+
+    repo_output_root: pasta raiz personalizada do repositório (configurada pelo usuário
+    via dashboard). Quando definida, os arquivos kept são gravados em
+    <repo_output_root>/photos|videos/... em vez do default organized/<repo>/...
+    """
     action = decision.action
     repo = file_info.repository_name_canonical
 
@@ -48,10 +54,13 @@ def build_destination(
 
     if action == STATUS_KEPT:
         media_subdir = SUBDIR_PHOTOS if file_info.media_kind == MEDIA_KIND_PHOTO else SUBDIR_VIDEOS
-        dest = (
-            cfg.output_root / DIR_ORGANIZED / repo / media_subdir
-            / year / month_label_str / day / filename
-        )
+        if repo_output_root:
+            dest = Path(repo_output_root) / media_subdir / year / month_label_str / day / filename
+        else:
+            dest = (
+                cfg.output_root / DIR_ORGANIZED / repo / media_subdir
+                / year / month_label_str / day / filename
+            )
     elif action == STATUS_DUPLICATE:
         dest = (
             cfg.output_root / DIR_DUPLICATES / repo
