@@ -1,6 +1,6 @@
 services:
   nasugreen:
-    image: cleibersilva/nasugreen:4.0.8
+    image: cleibersilva/nasugreen:4.3.0
     container_name: nasugreen
     restart: unless-stopped
 
@@ -8,10 +8,11 @@ services:
       - "9090:9090"   # Dashboard web acessível em http://IP-DO-NAS:9090
 
     volumes:
-      # Pasta de ENTRADA no NAS → /input dentro do container (somente-leitura)
+      # Pasta de ENTRADA no NAS → /input dentro do container
+      # Use :ro se o modo for "copy"; remova :ro se o modo for "move"
       - ./input:/input:ro
 
-      # Pasta de SAÍDA no NAS → /output dentro do container (leitura e escrita)
+      # Pasta de SAÍDA no NAS → /output dentro do container
       - ./output:/output
 
       # Arquivo de configuração
