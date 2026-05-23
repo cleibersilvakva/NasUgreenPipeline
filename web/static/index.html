@@ -1182,7 +1182,7 @@ async function triggerRun() {
     const r = await fetch('/api/pipeline/run', { method: 'POST' });
     if (!r.ok) {
       const e = await r.json();
-      showToast('Erro: ' + (e.detail ?? 'desconhecido'));
+      showToast('Erro: ' + (e.error ?? e.detail ?? 'desconhecido'));
     } else {
       switchTab('logs');
     }

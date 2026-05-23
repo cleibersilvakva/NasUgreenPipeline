@@ -19,10 +19,12 @@ FROM python:3.11-slim
 
 # Metadados da imagem
 LABEL org.opencontainers.image.title="Media Repository Pipeline"
-LABEL org.opencontainers.image.version="4.3.1"
+LABEL org.opencontainers.image.version="4.3.2"
 LABEL org.opencontainers.image.description="Pipeline de ingestão e organização de mídia para NAS"
 
-# Sem dependências apt — metadata extraído via Pillow e mutagen (Python puro)
+# Instala su-exec para troca segura de UID/GID em runtime (suporte PUID/PGID)
+RUN apt-get update && apt-get install -y --no-install-recommends su-exec \
+    && rm -rf /var/lib/apt/lists/*
 
 # Instalar o pacote a partir do wheel compilado no stage anterior
 COPY --from=builder /wheels /wheels
@@ -30,7 +32,7 @@ RUN pip install --no-cache-dir --no-index --find-links=/wheels media-repo-pipeli
     && rm -rf /wheels
 
 # Diretórios de montagem esperados pelos volumes
-# /input   → input_root  (origem dos arquivos — recomendado somente-leitura)
+# /input   → input_root  (origem dos arquivos)
 # /output  → output_root (destino organizado, banco, logs, relatórios)
 # /config  → pasta com o arquivo config.yaml
 # /db      → banco SQLite isolado (evita corrupção WAL em SMB/NFS)
@@ -43,9 +45,9 @@ VOLUME ["/input", "/output", "/config", "/db"]
 # Expor a porta 9090 do Dashboard
 EXPOSE 9090
 
-USER pipeline
+# Entrypoint suporta PUID/PGID para compatibilidade com NAS (Synology, UGREEN)
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
-ENTRYPOINT ["media-repo-pipeline-web"]
-
-# Argumento opcional
+ENTRYPOINT ["/entrypoint.sh", "media-repo-pipeline-web"]
 CMD ["--config", "/config/config.yaml"]

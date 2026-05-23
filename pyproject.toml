@@ -1,6 +1,6 @@
 [project]
 name = "media-repo-pipeline"
-version = "4.3.1"
+version = "4.3.2"
 description = "Pipeline de ingestão dinâmica e consolidação de repositórios de mídia"
 requires-python = ">=3.11"
 dependencies = [
