@@ -22,8 +22,8 @@ LABEL org.opencontainers.image.title="Media Repository Pipeline"
 LABEL org.opencontainers.image.version="4.3.2"
 LABEL org.opencontainers.image.description="Pipeline de ingestão e organização de mídia para NAS"
 
-# Instala su-exec para troca segura de UID/GID em runtime (suporte PUID/PGID)
-RUN apt-get update && apt-get install -y --no-install-recommends su-exec \
+# Instala gosu para troca segura de UID/GID em runtime (suporte PUID/PGID)
+RUN apt-get update && apt-get install -y --no-install-recommends gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # Instalar o pacote a partir do wheel compilado no stage anterior

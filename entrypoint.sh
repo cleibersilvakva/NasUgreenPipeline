@@ -8,7 +8,7 @@ if [ "$(id -u)" = "0" ]; then
     groupmod -o -g "$PGID" pipeline 2>/dev/null || true
     usermod  -o -u "$PUID" pipeline 2>/dev/null || true
     chown pipeline:pipeline /db 2>/dev/null || true
-    exec su-exec pipeline "$@"
+    exec gosu pipeline "$@"
 else
     exec "$@"
 fi
