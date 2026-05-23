@@ -19,7 +19,7 @@ FROM python:3.11-slim
 
 # Metadados da imagem
 LABEL org.opencontainers.image.title="Media Repository Pipeline"
-LABEL org.opencontainers.image.version="4.3.0"
+LABEL org.opencontainers.image.version="4.3.1"
 LABEL org.opencontainers.image.description="Pipeline de ingestão e organização de mídia para NAS"
 
 # Sem dependências apt — metadata extraído via Pillow e mutagen (Python puro)
@@ -33,13 +33,16 @@ RUN pip install --no-cache-dir --no-index --find-links=/wheels media-repo-pipeli
 # /input   → input_root  (origem dos arquivos — recomendado somente-leitura)
 # /output  → output_root (destino organizado, banco, logs, relatórios)
 # /config  → pasta com o arquivo config.yaml
-VOLUME ["/input", "/output", "/config"]
+# /db      → banco SQLite isolado (evita corrupção WAL em SMB/NFS)
+RUN useradd -r -u 1000 -m pipeline \
+    && mkdir -p /input /output /config /db \
+    && chown pipeline:pipeline /input /output /config /db
+
+VOLUME ["/input", "/output", "/config", "/db"]
 
 # Expor a porta 9090 do Dashboard
 EXPOSE 9090
 
-# Usuário não-root para segurança
-RUN useradd -r -u 1000 -m pipeline
 USER pipeline
 
 ENTRYPOINT ["media-repo-pipeline-web"]
