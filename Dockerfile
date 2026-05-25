@@ -19,7 +19,7 @@ FROM python:3.11-slim
 
 # Metadados da imagem
 LABEL org.opencontainers.image.title="Media Repository Pipeline"
-LABEL org.opencontainers.image.version="4.3.2"
+LABEL org.opencontainers.image.version="4.3.3"
 LABEL org.opencontainers.image.description="Pipeline de ingestão e organização de mídia para NAS"
 
 # Instala gosu para troca segura de UID/GID em runtime (suporte PUID/PGID)

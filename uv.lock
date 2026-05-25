@@ -126,7 +126,7 @@ wheels = [
 
 [[package]]
 name = "media-repo-pipeline"
-version = "4.2.4"
+version = "4.3.2"
 source = { editable = "." }
 dependencies = [
     { name = "mutagen" },

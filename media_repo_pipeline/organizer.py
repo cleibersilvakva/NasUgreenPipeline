@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -29,6 +30,12 @@ from .month_map import month_label
 from .utils import safe_destination_path, sanitize_filename, truncate_filename
 
 logger = logging.getLogger("media_repo_pipeline.organizer")
+
+# Detecta nomes já no formato pipeline: YYYY-MM-DD_HHMMSS_<original>_<hash6>[_N]
+# Captura o segmento "original" para evitar duplicação no novo nome.
+_PIPELINE_NAME_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}_\d{6}_(.+)_[0-9a-f]{6}(?:_\d+)?$"
+)
 
 
 def build_destination(
@@ -126,8 +133,12 @@ def _build_filename(file_info: FileInfo, cfg: PipelineConfig) -> str:
         except (ValueError, OSError):
             dt_str = "0000-00-00_000000"
 
-    # Nome original sanitizado
+    # Nome original sanitizado — strip de prefixo/sufixo do pipeline se o arquivo
+    # já foi organizado anteriormente (evita nomes como "2014-06-02_230312_2014-06-02_230312_DSC_0040_ddccac_ddccac.jpg")
     original_stem = Path(file_info.source_path).stem
+    m = _PIPELINE_NAME_RE.match(original_stem)
+    if m:
+        original_stem = m.group(1)
     original_clean = sanitize_filename(original_stem)
     if not original_clean:
         original_clean = "file"

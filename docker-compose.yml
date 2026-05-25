@@ -1,6 +1,6 @@
 services:
   nasugreen:
-    image: cleibersilva/nasugreen:4.3.2
+    image: cleibersilva/nasugreen:4.3.3
     container_name: nasugreen
     restart: unless-stopped
 

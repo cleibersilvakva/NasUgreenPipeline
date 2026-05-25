@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import PipelineConfig
-from .constants import STATUS_KEPT
+from .constants import STATUS_DUPLICATE, STATUS_KEPT
 from .db import Database
 from .dedup_service import compute_sha256
 from .errors import CopyError, SidecarError, TransactionError, ValidationError
@@ -99,7 +99,34 @@ def commit_pending_write(pending: PendingWrite, db: Database) -> None:
 
     Sempre chamado pelo writer thread (single-threaded) — zero contenção de lock.
     """
-    _record_to_db(pending.file_info, pending.decision, pending.dest_path, db)
+    fi = pending.file_info
+    decision = pending.decision
+
+    # Guard contra race intra-ciclo: dois workers podem ter decidido 'kept' para o
+    # mesmo hash antes de qualquer um commitar. O writer thread é single-threaded,
+    # então esta leitura é segura e definitiva.
+    if decision.action == STATUS_KEPT:
+        existing = db.find_kept_file(fi.repository_name_canonical, fi.hash_sha256)
+        if existing:
+            # Só remove a cópia se ela não é o mesmo arquivo já commitado.
+            # safe_destination_path não é thread-safe: dois workers com mesmo hash+stem
+            # podem ter recebido o mesmo dest_path. Nesse caso ambas as cópias apontam
+            # para o mesmo arquivo físico — não apagar.
+            canonical_dest = Path(existing["canonical_destination_path"])
+            if pending.dest_path != canonical_dest:
+                try:
+                    pending.dest_path.unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning("Não foi possível remover cópia duplicada %s: %s", pending.dest_path, exc)
+            # Reclassifica em-lugar para o relatório contabilizar corretamente
+            decision.action = STATUS_DUPLICATE
+            decision.reason = "Duplicata intra-ciclo (mesmo hash processado em paralelo)"
+            decision.duplicate_of_hash = fi.hash_sha256
+            _record_to_db(fi, decision, pending.dest_path, db)
+            logger.info("⚠ [duplicate] %s (intra-ciclo, cópia preservada em %s)", fi.rel_input_path, canonical_dest)
+            return
+
+    _record_to_db(fi, decision, pending.dest_path, db)
 
     if pending.cfg_mode == "move":
         try:
@@ -110,7 +137,7 @@ def commit_pending_write(pending: PendingWrite, db: Database) -> None:
 
     logger.info(
         "✓ [%s] %s → %s",
-        pending.decision.action, pending.file_info.rel_input_path, pending.dest_path,
+        decision.action, fi.rel_input_path, pending.dest_path,
     )
 
 
