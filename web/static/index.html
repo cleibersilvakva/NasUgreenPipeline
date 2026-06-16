@@ -37,7 +37,7 @@ html,body {
 /* ── Layout ── */
 #app {
   display: grid;
-  grid-template-rows: 52px auto 40px auto 1fr;
+  grid-template-rows: 52px auto auto auto auto 1fr;
   height: 100vh;
 }
 
@@ -527,6 +527,38 @@ label.asc { display: flex; align-items: center; gap: 5px; cursor: pointer; user-
 .cll-fatal  { color: var(--red); font-weight: 600; }
 .cll-hdr    { color: var(--text2); }
 
+/* ── Cycle progress bar ── */
+#cycle-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 18px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  overflow: hidden;
+  max-height: 0;
+  transition: max-height .2s ease, padding .2s ease;
+}
+#cycle-bar.visible {
+  max-height: 32px;
+  padding: 5px 18px;
+}
+
+.cy-phase    { color: var(--accent); font-weight: 600; white-space: nowrap; min-width: 140px; }
+.cy-track    { flex: 1; height: 4px; background: var(--surface2); border-radius: 2px; overflow: hidden; min-width: 60px; }
+.cy-fill     { height: 100%; background: var(--accent); border-radius: 2px; transition: width .6s ease; width: 0%; }
+.cy-prog     { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--text); font-weight: 500; min-width: 150px; text-align: right; }
+.cy-sep      { color: var(--border); flex-shrink: 0; }
+.cy-kept     { color: var(--green); white-space: nowrap; }
+.cy-dup      { color: var(--accent); white-space: nowrap; }
+.cy-rev      { color: var(--amber); white-space: nowrap; }
+.cy-err      { color: var(--red); white-space: nowrap; }
+.cy-elapsed  { color: var(--text2); white-space: nowrap; }
+.cy-activity { white-space: nowrap; color: var(--text2); }
+.cy-activity.warn  { color: var(--amber); }
+.cy-activity.alert { color: var(--red); font-weight: 600; }
+
 /* ── Lightbox ── */
 #lightbox {
   position: fixed; inset: 0;
@@ -648,6 +680,22 @@ label.asc { display: flex; align-items: center; gap: 5px; cursor: pointer; user-
       <button class="btn btn-stop"    id="btn-stop" style="display:none" onclick="triggerStop()">■ Parar</button>
     </div>
   </header>
+
+  <!-- Barra de progresso do ciclo (visível enquanto o pipeline roda) -->
+  <div id="cycle-bar">
+    <span class="cy-phase"   id="cy-phase">⚙ Processando</span>
+    <div  class="cy-track"><div class="cy-fill" id="cy-fill"></div></div>
+    <span class="cy-prog"    id="cy-prog"></span>
+    <span class="cy-sep">·</span>
+    <span class="cy-kept"    id="cy-kept">✓ 0</span>
+    <span class="cy-dup"     id="cy-dup">⊙ 0</span>
+    <span class="cy-rev"     id="cy-rev">△ 0</span>
+    <span class="cy-err"     id="cy-err">✗ 0</span>
+    <span class="cy-sep">·</span>
+    <span class="cy-elapsed" id="cy-elapsed"></span>
+    <span class="cy-sep cy-act-sep" id="cy-act-sep" style="display:none">·</span>
+    <span class="cy-activity" id="cy-activity"></span>
+  </div>
 
   <!-- Pending repos banner (oculto por default) -->
   <div id="pending-bar">
@@ -835,6 +883,119 @@ const S = {
   loaded:  { input: false, output: false },
   entries: { input: [], output: [] },
 };
+
+// ── Estado do ciclo ───────────────────────────────────────────────────────────
+const CYCLE = {
+  phase: 'idle', total: 0, done: 0,
+  kept: 0, duplicate: 0, review: 0, error: 0,
+  startedAt: null,   // Unix timestamp (s) recebido do servidor
+  lastLogAt: null,   // JS timestamp (ms) da última linha de log
+  timer: null,
+};
+
+const PHASE_LABEL = {
+  starting:   '⏱ Iniciando…',
+  scanning:   '🔍 Escaneando',
+  preparing:  '📊 Analisando',
+  snapshot:   '⏳ Carregando banco',
+  processing: '⚙ Processando',
+};
+
+function onCycleProgress(d) {
+  CYCLE.phase     = d.phase     || 'idle';
+  CYCLE.total     = d.total     || 0;
+  CYCLE.done      = d.done      || 0;
+  CYCLE.kept      = d.kept      || 0;
+  CYCLE.duplicate = d.duplicate || 0;
+  CYCLE.review    = d.review    || 0;
+  CYCLE.error     = d.error     || 0;
+  if (d.started_at != null) CYCLE.startedAt = d.started_at;
+
+  const bar = document.getElementById('cycle-bar');
+  if (!CYCLE.phase || CYCLE.phase === 'idle') {
+    bar.classList.remove('visible');
+    _stopCycleTimer();
+    return;
+  }
+  bar.classList.add('visible');
+  _updateCycleUI();
+  _startCycleTimer();
+}
+
+function _updateCycleUI() {
+  const pct = CYCLE.total > 0 ? CYCLE.done / CYCLE.total : 0;
+  const label = PHASE_LABEL[CYCLE.phase] || ('⚙ ' + CYCLE.phase);
+
+  document.getElementById('cy-phase').textContent = label;
+  document.getElementById('cy-fill').style.width  = (pct * 100).toFixed(1) + '%';
+
+  const progEl = document.getElementById('cy-prog');
+  if (CYCLE.total > 0) {
+    progEl.textContent = `${_fmtN(CYCLE.done)} / ${_fmtN(CYCLE.total)}  (${(pct * 100).toFixed(0)}%)`;
+  } else {
+    progEl.textContent = '';
+  }
+
+  document.getElementById('cy-kept').textContent = '✓ ' + _fmtN(CYCLE.kept);
+  document.getElementById('cy-dup') .textContent = '⊙ ' + _fmtN(CYCLE.duplicate);
+  document.getElementById('cy-rev') .textContent = '△ ' + _fmtN(CYCLE.review);
+  document.getElementById('cy-err') .textContent = '✗ ' + _fmtN(CYCLE.error);
+
+  // Atualiza texto do badge com percentual
+  if (S.status === 'running') {
+    const btext = document.getElementById('btext');
+    btext.textContent = CYCLE.total > 0
+      ? `${(pct * 100).toFixed(0)}%`
+      : (PHASE_LABEL[CYCLE.phase] || 'Executando…');
+  }
+
+  _updateCycleTimers();
+}
+
+function _updateCycleTimers() {
+  // Tempo decorrido desde o início do ciclo
+  const elEl = document.getElementById('cy-elapsed');
+  if (CYCLE.startedAt) {
+    const sec = Math.floor(Date.now() / 1000 - CYCLE.startedAt);
+    elEl.textContent = _fmtDur(sec);
+  } else {
+    elEl.textContent = '';
+  }
+
+  // Indicador de última atividade (heartbeat)
+  const actEl  = document.getElementById('cy-activity');
+  const sepEl  = document.getElementById('cy-act-sep');
+  if (CYCLE.lastLogAt) {
+    const ago = Math.floor((Date.now() - CYCLE.lastLogAt) / 1000);
+    if (ago < 15) {
+      actEl.textContent = '';
+      actEl.className = 'cy-activity';
+      sepEl.style.display = 'none';
+    } else {
+      actEl.textContent = `sem ativ. ${_fmtDur(ago)} atrás`;
+      actEl.className   = 'cy-activity' + (ago > 120 ? ' alert' : ' warn');
+      sepEl.style.display = '';
+    }
+  } else {
+    actEl.textContent = '';
+    actEl.className = 'cy-activity';
+    sepEl.style.display = 'none';
+  }
+}
+
+function _fmtN(n)    { return (n || 0).toLocaleString('pt-BR'); }
+function _fmtDur(s)  {
+  if (s < 60)   return `${s}s`;
+  if (s < 3600) return `${Math.floor(s/60)}min ${s%60}s`;
+  return `${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}min`;
+}
+
+function _startCycleTimer() {
+  if (!CYCLE.timer) CYCLE.timer = setInterval(_updateCycleTimers, 1000);
+}
+function _stopCycleTimer() {
+  if (CYCLE.timer) { clearInterval(CYCLE.timer); CYCLE.timer = null; }
+}
 
 // ── Cleanup ───────────────────────────────────────────────────────────────────
 const CL = { running: false, total: 0, done: 0 };
@@ -1077,10 +1238,11 @@ function connectSSE() {
   evtSrc = new EventSource('/api/pipeline/events');
   evtSrc.onmessage = (e) => {
     const d = JSON.parse(e.data);
-    if      (d.type === 'log')            appendLog(d.line);
-    else if (d.type === 'status')         onStatus(d);
-    else if (d.type === 'cleanup_event')  _onCleanupEvent(d.event);
-    else if (d.type === 'cleanup_status') _onCleanupStatus(d);
+    if      (d.type === 'log')             appendLog(d.line);
+    else if (d.type === 'status')          onStatus(d);
+    else if (d.type === 'cycle_progress')  onCycleProgress(d);
+    else if (d.type === 'cleanup_event')   _onCleanupEvent(d.event);
+    else if (d.type === 'cleanup_status')  _onCleanupStatus(d);
     else if (d.type === 'repo_configured') loadPendingRepos();
   };
   evtSrc.onerror = () => setTimeout(connectSSE, 3000);
@@ -1101,7 +1263,6 @@ function onStatus({ status, returncode }) {
     btext.textContent = 'Executando…';
     btnRun.style.display = 'none';
     btnStp.style.display = 'flex';
-    // Polling de stats a cada 8s durante execução
     if (!_statsPollTimer) {
       _statsPollTimer = setInterval(loadStats, 8000);
     }
@@ -1109,7 +1270,9 @@ function onStatus({ status, returncode }) {
     btext.textContent = 'Aguardando';
     btnRun.style.display = 'flex';
     btnStp.style.display = 'none';
-    // Para o polling quando idle
+    // Garante que a barra de ciclo suma mesmo se cycle_progress não vier
+    document.getElementById('cycle-bar').classList.remove('visible');
+    _stopCycleTimer();
     if (_statsPollTimer) { clearInterval(_statsPollTimer); _statsPollTimer = null; }
     if (returncode !== undefined) {
       showToast(returncode === 0 ? '✓ Execução concluída com sucesso' : `✗ Encerrado (código ${returncode})`);
@@ -1124,6 +1287,7 @@ function onStatus({ status, returncode }) {
 
 // ── Logs ──────────────────────────────────────────────────────────────────────
 function appendLog(raw) {
+  CYCLE.lastLogAt = Date.now();  // atualiza heartbeat a cada linha de log
   const out = document.getElementById('log-out');
   const el  = document.createElement('span');
   el.className = 'll new ' + logClass(raw);
@@ -1137,11 +1301,13 @@ function appendLog(raw) {
 }
 
 function logClass(line) {
-  if (/ERROR|✗/.test(line))           return 'err';
-  if (/WARNING|WARN/.test(line))      return 'warn';
-  if (/✓/.test(line))                 return 'ok';
-  if (/═══|───/.test(line))           return 'hdr';
-  if (/DEBUG/.test(line))             return 'dim';
+  if (/ERROR|✗/.test(line))              return 'err';
+  if (/WARNING|WARN/.test(line))         return 'warn';
+  if (/✓/.test(line))                    return 'ok';
+  if (/═══|───/.test(line))              return 'hdr';
+  if (/⚙ Progresso:|▶ Snapshot/.test(line)) return 'hdr';
+  if (/⏳/.test(line))                   return 'warn';
+  if (/DEBUG/.test(line))                return 'dim';
   return 'info';
 }
 

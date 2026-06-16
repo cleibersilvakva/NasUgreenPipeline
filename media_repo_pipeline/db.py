@@ -502,3 +502,11 @@ class Database:
     def get_all_kept_files(self) -> list[dict[str, Any]]:
         rows = self.conn.execute("SELECT * FROM kept_files").fetchall()
         return [dict(r) for r in rows]
+
+    def get_kept_files_snapshot(self) -> list[dict[str, Any]]:
+        """Versão leve: apenas os campos usados pelo check RAW/JPG (sem metadata_json)."""
+        rows = self.conn.execute(
+            "SELECT repository_name_canonical, hash_sha256, canonical_destination_path,"
+            " media_kind, extension FROM kept_files"
+        ).fetchall()
+        return [dict(r) for r in rows]

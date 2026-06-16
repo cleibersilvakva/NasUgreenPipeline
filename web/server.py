@@ -11,11 +11,13 @@ import json
 import logging
 import os
 import queue
+import re
 import socketserver
 import sqlite3
 import subprocess
 import sys
 import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -36,6 +38,59 @@ _cleanup_lock = threading.Lock()
 _sse_clients: list[queue.Queue] = []
 _sse_lock = threading.Lock()
 _CONFIG_PATH: Path | None = None
+
+# Estado do ciclo atual — atualizado em tempo real pelo parser de logs
+_cycle_state: dict[str, Any] = {
+    "phase": "idle",   # idle | starting | scanning | preparing | snapshot | processing
+    "total": 0,
+    "done": 0,
+    "kept": 0,
+    "duplicate": 0,
+    "review": 0,
+    "error": 0,
+    "run_id": None,
+    "started_at": None,  # float Unix timestamp
+}
+_cycle_lock = threading.Lock()
+
+
+def _update_cycle_from_log(line: str) -> None:
+    """Parse uma linha de log do pipeline e atualiza _cycle_state. Thread-safe."""
+    snap: dict | None = None
+    with _cycle_lock:
+        if "═══ Ciclo" in line:
+            m = re.search(r"Ciclo (\d+) iniciado", line)
+            if m:
+                _cycle_state.update({
+                    "phase": "scanning", "total": 0, "done": 0,
+                    "kept": 0, "duplicate": 0, "review": 0, "error": 0,
+                    "run_id": int(m.group(1)), "started_at": time.time(),
+                })
+                snap = dict(_cycle_state)
+        elif "Total a processar neste ciclo:" in line:
+            m = re.search(r"Total a processar neste ciclo: (\d+)", line)
+            if m:
+                _cycle_state["total"] = int(m.group(1))
+                _cycle_state["phase"] = "preparing"
+                snap = dict(_cycle_state)
+        elif "⏳ Carregando snapshot" in line:
+            _cycle_state["phase"] = "snapshot"
+            snap = dict(_cycle_state)
+        elif "▶ Snapshot pronto" in line:
+            _cycle_state["phase"] = "processing"
+            snap = dict(_cycle_state)
+        elif "⚙ Progresso:" in line:
+            m = re.search(r"Progresso: (\d+)/(\d+) \| kept=(\d+) dup=(\d+) rev=(\d+) err=(\d+)", line)
+            if m:
+                _cycle_state.update({
+                    "done": int(m.group(1)), "total": int(m.group(2)),
+                    "kept": int(m.group(3)), "duplicate": int(m.group(4)),
+                    "review": int(m.group(5)), "error": int(m.group(6)),
+                    "phase": "processing",
+                })
+                snap = dict(_cycle_state)
+    if snap:
+        _broadcast({"type": "cycle_progress", **snap})
 
 _STATIC = Path(__file__).parent / "static"
 
@@ -141,7 +196,15 @@ def _broadcast(data: dict[str, Any]) -> None:
 
 def _pipeline_thread(config_path: str) -> None:
     global _pipeline_proc, _pipeline_starting
+    with _cycle_lock:
+        _cycle_state.update({
+            "phase": "starting", "total": 0, "done": 0,
+            "kept": 0, "duplicate": 0, "review": 0, "error": 0,
+            "run_id": None, "started_at": time.time(),
+        })
+        snap = dict(_cycle_state)
     _broadcast({"type": "status", "status": "running"})
+    _broadcast({"type": "cycle_progress", **snap})
     returncode = 1
     try:
         # No ambiente local ou em contêiner (v4+), simplesmente invoca o módulo
@@ -165,6 +228,7 @@ def _pipeline_thread(config_path: str) -> None:
             line = line.rstrip("\n")
             if line:
                 _broadcast({"type": "log", "line": line})
+                _update_cycle_from_log(line)
         proc.wait()
         returncode = proc.returncode
     except Exception as exc:
@@ -173,7 +237,11 @@ def _pipeline_thread(config_path: str) -> None:
         with _pipeline_lock:
             _pipeline_proc = None
             _pipeline_starting = False
+        with _cycle_lock:
+            _cycle_state["phase"] = "idle"
+            snap = dict(_cycle_state)
         _broadcast({"type": "status", "status": "idle", "returncode": returncode})
+        _broadcast({"type": "cycle_progress", **snap})
 
 
 # ── API handlers ───────────────────────────────────────────────────────────────
@@ -183,6 +251,11 @@ def _api_status() -> dict[str, Any]:
     with _pipeline_lock:
         running = _pipeline_proc is not None or _pipeline_starting
     return {"status": "running" if running else "idle"}
+
+
+def _api_cycle_state() -> dict[str, Any]:
+    with _cycle_lock:
+        return dict(_cycle_state)
 
 
 def _api_run() -> tuple[int, dict[str, Any]]:
@@ -593,8 +666,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.send_header("X-Accel-Buffering", "no")
                 self.end_headers()
-                # Heartbeat inicial
+                # Heartbeat inicial + estado atual (para reconexão sem perda)
                 self.wfile.write(b'data: {"type":"ping"}\n\n')
+                with _pipeline_lock:
+                    is_running = _pipeline_proc is not None or _pipeline_starting
+                init_status = json.dumps({"type": "status", "status": "running" if is_running else "idle"}).encode()
+                self.wfile.write(b"data: " + init_status + b"\n\n")
+                with _cycle_lock:
+                    init_cycle = json.dumps({"type": "cycle_progress", **dict(_cycle_state)}).encode()
+                self.wfile.write(b"data: " + init_cycle + b"\n\n")
                 self.wfile.flush()
                 while True:
                     try:
@@ -623,6 +703,7 @@ class Handler(BaseHTTPRequestHandler):
         # JSON endpoints
         routes_get: dict[str, Any] = {
             "/api/status":          lambda: (200, _api_status()),
+            "/api/status/cycle":    lambda: (200, _api_cycle_state()),
             "/api/files":           lambda: _api_files(self._parse_qs()),
             "/api/db/last-run":     lambda: (200, _api_last_run()),
             "/api/cleanup/preview": lambda: _api_cleanup_preview(),

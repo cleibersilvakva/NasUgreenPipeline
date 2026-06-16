@@ -23,6 +23,7 @@ from .logging_setup import setup_logging
 from .metadata_service import extract as extract_metadata
 from .models import Decision, FileInfo, ProcessingResult
 from .organizer import build_destination
+from .profiler import NullTimer, PhaseTimer, TimerProtocol
 from .reconciler import reconcile
 from .reporting import RunReport
 from .repository_service import ensure_repository, mark_repositories_inactive
@@ -131,6 +132,7 @@ def _run_cycle(db: Database, cfg: PipelineConfig) -> None:
     run_id = db.start_run(cfg.mode, cfg.pipeline_version, cfg.policy_version)
     report = RunReport(run_id, cfg)
     report_lock = threading.Lock()
+    timer: TimerProtocol = PhaseTimer() if cfg.profile_enabled else NullTimer()
 
     logger.info("═══ Ciclo %d iniciado (workers=%d) ═══", run_id, cfg.workers_count)
 
@@ -172,8 +174,12 @@ def _run_cycle(db: Database, cfg: PipelineConfig) -> None:
         db.finish_run(run_id, report.stats)
         return
 
-    # Snapshot de kept_files para check RAW/JPG (feito uma vez, pré-pool)
-    kept_files_snapshot = db.get_all_kept_files()
+    # Snapshot leve (sem metadata_json) para check RAW/JPG — reduz uso de RAM
+    _SUBMIT_CHUNK = 500
+    logger.info("⏳ Carregando snapshot do banco…")
+    kept_files_snapshot = db.get_kept_files_snapshot()
+    n_lotes = -(-total_work // _SUBMIT_CHUNK)
+    logger.info("▶ Snapshot pronto (%d registros). Iniciando processamento em %d lote(s)…", len(kept_files_snapshot), n_lotes)
 
     # 2. Writer thread — única thread que escreve no banco, zero contenção de lock.
     #    Workers fazem I/O (cópia, hash, sidecar) em paralelo e empurram PendingWrite
@@ -237,26 +243,31 @@ def _run_cycle(db: Database, cfg: PipelineConfig) -> None:
             return _process_single_file_io(
                 file_path, source_path, repo_record,
                 thread_db, cfg, kept_files_snapshot, thread_tmp_suffix,
+                timer=timer,
             )
         finally:
             thread_db.close()
 
+    # Processa em lotes para evitar alocar dezenas de milhares de futures de uma vez
+    # (OOM em NAS/ARM com muitos arquivos).
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(_worker, item): item[0]
-            for item in work_items
-            if not _shutdown_requested
-        }
-        for future in as_completed(futures):
-            if _shutdown_requested:
-                executor.shutdown(wait=False, cancel_futures=True)
+        import itertools as _itertools
+        items_iter = iter(work_items)
+        while not _shutdown_requested:
+            chunk = list(_itertools.islice(items_iter, _SUBMIT_CHUNK))
+            if not chunk:
                 break
-            try:
-                result, pending = future.result()
-                write_queue.put((result, pending))
-            except Exception as exc:
-                fp = futures[future]
-                logger.error("Erro inesperado em thread para %s: %s", fp, exc, exc_info=True)
+            futures = {executor.submit(_worker, item): item[0] for item in chunk}
+            for future in as_completed(futures):
+                if _shutdown_requested:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
+                try:
+                    result, pending = future.result()
+                    write_queue.put((result, pending))
+                except Exception as exc:
+                    fp = futures[future]
+                    logger.error("Erro inesperado em thread para %s: %s", fp, exc, exc_info=True)
 
     # Aguarda o writer terminar todos os commits antes de prosseguir
     write_queue.put(_SENTINEL)
@@ -283,6 +294,9 @@ def _run_cycle(db: Database, cfg: PipelineConfig) -> None:
     summary = report.summary()
     logger.info("\n%s", summary)
 
+    if cfg.profile_enabled:
+        logger.info("\n%s", timer.summary())
+
 
 def _process_single_file_io(
     file_path: Path,
@@ -292,6 +306,7 @@ def _process_single_file_io(
     cfg: PipelineConfig,
     kept_files_snapshot: list,
     tmp_suffix: str = "",
+    timer: TimerProtocol | None = None,
 ) -> tuple[ProcessingResult, PendingWrite | None]:
     """Fase de I/O de um único arquivo — lógica + cópia + sidecar. Não grava no banco.
 
@@ -301,13 +316,16 @@ def _process_single_file_io(
     """
     assert logger is not None
     canonical = repo_record.repository_name_canonical
+    if timer is None:
+        timer = NullTimer()
 
     # Construir FileInfo básico
-    try:
-        st = file_path.stat()
-    except OSError as exc:
-        logger.warning("Não foi possível acessar %s: %s", file_path, exc)
-        return ProcessingResult(success=False, error_message=str(exc), error_type="OSError"), None
+    with timer.phase("stat"):
+        try:
+            st = file_path.stat()
+        except OSError as exc:
+            logger.warning("Não foi possível acessar %s: %s", file_path, exc)
+            return ProcessingResult(success=False, error_message=str(exc), error_type="OSError"), None
 
     ext = file_path.suffix.lower()
     rel_input = str(file_path.relative_to(repo_source_path))
@@ -332,7 +350,8 @@ def _process_single_file_io(
         ), None
 
     # 2. Verificar source_state — arquivo inalterado? (leitura ok em paralelo)
-    ss = db.get_source_state(str(file_path))
+    with timer.phase("source_state_lookup"):
+        ss = db.get_source_state(str(file_path))
     if ss and ss["size_bytes"] == fi.size_bytes and ss["mtime_epoch"] == fi.mtime_epoch:
         if ss["last_status"] not in (STATUS_ERROR,):
             return ProcessingResult(
@@ -341,48 +360,55 @@ def _process_single_file_io(
             ), None
 
     # 3. Estabilidade
-    if not cfg.dry_run and not is_file_stable(file_path, cfg):
-        logger.debug("Arquivo instável (em cópia?): %s", file_path)
-        return ProcessingResult(
-            success=False, file_info=fi,
-            error_message="Arquivo instável", error_type="FileStabilityError",
-        ), None
+    if not cfg.dry_run:
+        with timer.phase("stability_check"):
+            stable = is_file_stable(file_path, cfg)
+        if not stable:
+            logger.debug("Arquivo instável (em cópia?): %s", file_path)
+            return ProcessingResult(
+                success=False, file_info=fi,
+                error_message="Arquivo instável", error_type="FileStabilityError",
+            ), None
 
     # 4. Classificar mídia
     fi.media_kind = classify_media_kind(ext)
 
     # 5. Extrair metadata
-    try:
-        meta = extract_metadata(file_path, fi.media_kind, cfg)
-        fi.capture_dt = meta["capture_dt"]
-        fi.capture_dt_source = meta["capture_dt_source"]
-        fi.capture_dt_confidence = meta["capture_dt_confidence"]
-        fi.device_make = meta["device_make"]
-        fi.device_model = meta["device_model"]
-        fi.software = meta["software"]
-        fi.metadata_json = meta["metadata_json"]
-    except Exception as exc:
-        logger.warning("Falha de metadata para %s: %s", file_path, exc)
+    with timer.phase("metadata_extract"):
+        try:
+            meta = extract_metadata(file_path, fi.media_kind, cfg)
+            fi.capture_dt = meta["capture_dt"]
+            fi.capture_dt_source = meta["capture_dt_source"]
+            fi.capture_dt_confidence = meta["capture_dt_confidence"]
+            fi.device_make = meta["device_make"]
+            fi.device_model = meta["device_model"]
+            fi.software = meta["software"]
+            fi.metadata_json = meta["metadata_json"]
+        except Exception as exc:
+            logger.warning("Falha de metadata para %s: %s", file_path, exc)
 
     # 6. Calcular hash
-    try:
-        fi.hash_sha256 = compute_sha256(file_path)
-    except HashComputationError as exc:
-        logger.error("Falha ao calcular hash: %s", exc)
-        return ProcessingResult(
-            success=False, file_info=fi,
-            error_message=str(exc), error_type="HashComputationError",
-        ), None
+    with timer.phase("hash_sha256_source", bytes_processed=fi.size_bytes):
+        try:
+            fi.hash_sha256 = compute_sha256(file_path)
+        except HashComputationError as exc:
+            logger.error("Falha ao calcular hash: %s", exc)
+            return ProcessingResult(
+                success=False, file_info=fi,
+                error_message=str(exc), error_type="HashComputationError",
+            ), None
 
     # 7. Nome normalizado
     fi.base_name_normalized = file_path.stem
 
     # 8. Deduplicação — leitura ok em paralelo (kept_files é imutável no ciclo)
-    dup_ref = find_duplicate(canonical, fi.hash_sha256, db)
+    with timer.phase("dedup_lookup"):
+        dup_ref = find_duplicate(canonical, fi.hash_sha256, db)
     is_dup = dup_ref is not None
 
     # 9. RAW/JPG — snapshot pré-calculado, thread-safe
-    raw_decision = check_raw_jpg_conflict(fi, kept_files_snapshot)
+    with timer.phase("raw_jpg_check"):
+        raw_decision = check_raw_jpg_conflict(fi, kept_files_snapshot)
     decision = raw_decision if raw_decision else decide(fi, is_dup, dup_ref)
 
     # 10. Construir caminho de destino
@@ -394,7 +420,7 @@ def _process_single_file_io(
         return ProcessingResult(success=True, file_info=fi, decision=decision), None
 
     # 12. Fase de I/O (cópia, validate, rename, sidecar) — sem DB
-    return process_file_io(fi, decision, dest_path, cfg, tmp_suffix=tmp_suffix)
+    return process_file_io(fi, decision, dest_path, cfg, tmp_suffix=tmp_suffix, timer=timer)
 
 
 

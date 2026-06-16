@@ -17,6 +17,12 @@ low_disk_space_threshold_bytes: 10737418240  # 10 GiB
 pipeline_version: v4
 policy_version: v4-policy-001
 
+# Instrumentação por fase — quando true, loga no fim de cada ciclo um resumo
+# com N, total, média/p50/p95 e MB/s de cada fase (stat, hash, copy, validate,
+# dedup lookup, etc). Custo zero quando false. Pode também ser ligado pela
+# env MRPL_PROFILE_ENABLED=true.
+profile_enabled: false
+
 ignored_extensions:
   - .xmp
   - .aae

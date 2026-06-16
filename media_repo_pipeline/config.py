@@ -37,6 +37,7 @@ class PipelineConfig:
     run_once: bool = False
     verbose: bool = False
     reconcile_only: bool = False
+    profile_enabled: bool = False
 
     def __post_init__(self) -> None:
         self.input_root = Path(self.input_root)
@@ -95,6 +96,7 @@ def load_config(
         "MRPL_WORKERS": "workers_count",
         "MRPL_TIMEZONE": "default_timezone",
         "MRPL_VERBOSE": "verbose",
+        "MRPL_PROFILE_ENABLED": "profile_enabled",
     }
     for env_key, cfg_key in env_map.items():
         val = os.environ.get(env_key)
@@ -120,7 +122,7 @@ def load_config(
         if f in data and not isinstance(data[f], int):
             data[f] = int(data[f])
 
-    bool_fields = ("sidecar_enabled", "dry_run", "run_once", "verbose", "reconcile_only")
+    bool_fields = ("sidecar_enabled", "dry_run", "run_once", "verbose", "reconcile_only", "profile_enabled")
     for f in bool_fields:
         if f in data and not isinstance(data[f], bool):
             data[f] = str(data[f]).lower() in ("true", "1", "yes")

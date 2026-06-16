@@ -15,6 +15,7 @@ from .db import Database
 from .dedup_service import compute_sha256
 from .errors import CopyError, SidecarError, TransactionError, ValidationError
 from .models import Decision, FileInfo, ProcessingResult
+from .profiler import NullTimer, TimerProtocol
 from .sidecar_service import generate_sidecar
 
 logger = logging.getLogger("media_repo_pipeline.transaction")
@@ -41,12 +42,15 @@ def process_file_io(
     dest_path: Path,
     cfg: PipelineConfig,
     tmp_suffix: str = "",
+    timer: TimerProtocol | None = None,
 ) -> tuple[ProcessingResult, PendingWrite | None]:
     """Fase de I/O: copia, valida, renomeia e gera sidecar. NÃO toca o banco.
 
     Retorna (result, pending). pending é None se houve falha — nenhuma escrita
     será feita no banco para este arquivo.
     """
+    if timer is None:
+        timer = NullTimer()
     result = ProcessingResult(file_info=file_info, decision=decision)
     tmp_dir = cfg.tmp_dir
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -57,16 +61,20 @@ def process_file_io(
     renamed = False
 
     try:
-        _safe_copy(source, tmp_path)
-        _validate_copy(source, tmp_path, file_info)
+        with timer.phase("copy_to_tmp", bytes_processed=file_info.size_bytes):
+            _safe_copy(source, tmp_path)
+        with timer.phase("validate_copy", bytes_processed=file_info.size_bytes):
+            _validate_copy(source, tmp_path, file_info)
 
         dest_path.parent.mkdir(parents=True, exist_ok=True)
-        os.rename(str(tmp_path), str(dest_path))
+        with timer.phase("rename_to_dest"):
+            os.rename(str(tmp_path), str(dest_path))
         renamed = True
         logger.debug("Arquivo movido para destino final: %s", dest_path)
 
         if decision.action == STATUS_KEPT and cfg.sidecar_enabled:
-            generate_sidecar(file_info, dest_path, cfg)
+            with timer.phase("sidecar"):
+                generate_sidecar(file_info, dest_path, cfg)
 
         pending = PendingWrite(
             file_info=file_info,
