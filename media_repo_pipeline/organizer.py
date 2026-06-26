@@ -86,8 +86,8 @@ def build_destination(
     else:
         dest = cfg.output_root / DIR_REVIEW / repo / filename
 
-    # Garante que não sobrescreve
-    dest = safe_destination_path(dest)
+    # Garante que não sobrescreve — se hash fornecido, verifica conteúdo do existente
+    dest = safe_destination_path(dest, hash_sha256=file_info.hash_sha256 or None)
     decision.destination = str(dest)
     return dest
 

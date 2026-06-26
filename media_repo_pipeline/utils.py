@@ -2,9 +2,23 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import unicodedata
 from pathlib import Path
+
+_HASH_BUF_SIZE = 1024 * 1024  # 1 MiB
+
+
+def _sha256_of_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            buf = f.read(_HASH_BUF_SIZE)
+            if not buf:
+                break
+            h.update(buf)
+    return h.hexdigest()
 
 
 def canonicalize_repo_name(raw_name: str) -> str:
@@ -52,13 +66,21 @@ def truncate_filename(name: str, max_length: int, ext: str) -> str:
     return name[:allowed] + ext
 
 
-def safe_destination_path(dest: Path) -> Path:
+def safe_destination_path(dest: Path, hash_sha256: str | None = None) -> Path:
     """Garante que o caminho de destino não sobrescreva um arquivo existente.
 
-    Adiciona sufixo incremental ``_N`` se necessário.
+    Se ``hash_sha256`` for fornecido e o arquivo existente tiver o mesmo hash,
+    retorna ``dest`` sem modificação — o arquivo já está corretamente no destino
+    e não precisa de cópia duplicada. Caso contrário adiciona sufixo ``_N``.
     """
     if not dest.exists():
         return dest
+    if hash_sha256:
+        try:
+            if _sha256_of_file(dest) == hash_sha256:
+                return dest
+        except OSError:
+            pass
     stem = dest.stem
     ext = dest.suffix
     parent = dest.parent

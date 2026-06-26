@@ -34,6 +34,7 @@ class PendingWrite:
     dest_path: Path
     source_path: Path
     cfg_mode: str  # 'copy' | 'move'
+    marked_source_path: Path | None = None  # path renomeado com _ok, se mark_source_ok ativado
 
 
 def process_file_io(
@@ -76,12 +77,28 @@ def process_file_io(
             with timer.phase("sidecar"):
                 generate_sidecar(file_info, dest_path, cfg)
 
+        # Marcar arquivo original com _ok após confirmar cópia no destino
+        marked_source: Path | None = None
+        if (
+            cfg.mark_source_ok
+            and decision.action == STATUS_KEPT
+            and cfg.mode == "copy"
+        ):
+            ok_path = source.parent / (source.stem + "_ok" + source.suffix)
+            try:
+                source.rename(ok_path)
+                marked_source = ok_path
+                logger.debug("Origem marcada como ok: %s → %s", source.name, ok_path.name)
+            except OSError as exc:
+                logger.warning("Não foi possível marcar origem como _ok (%s): %s", source, exc)
+
         pending = PendingWrite(
             file_info=file_info,
             decision=decision,
             dest_path=dest_path,
             source_path=source,
             cfg_mode=cfg.mode,
+            marked_source_path=marked_source,
         )
         return result, pending
 
@@ -130,11 +147,13 @@ def commit_pending_write(pending: PendingWrite, db: Database) -> None:
             decision.action = STATUS_DUPLICATE
             decision.reason = "Duplicata intra-ciclo (mesmo hash processado em paralelo)"
             decision.duplicate_of_hash = fi.hash_sha256
-            _record_to_db(fi, decision, pending.dest_path, db)
+            _record_to_db(fi, decision, pending.dest_path, db,
+                          state_source_override=str(pending.marked_source_path) if pending.marked_source_path else None)
             logger.info("⚠ [duplicate] %s (intra-ciclo, cópia preservada em %s)", fi.rel_input_path, canonical_dest)
             return
 
-    _record_to_db(fi, decision, pending.dest_path, db)
+    _record_to_db(fi, decision, pending.dest_path, db,
+                  state_source_override=str(pending.marked_source_path) if pending.marked_source_path else None)
 
     if pending.cfg_mode == "move":
         try:
@@ -203,12 +222,15 @@ def _validate_copy(src: Path, tmp: Path, file_info: FileInfo) -> None:
 
 
 def _record_to_db(
-    fi: FileInfo, decision: Decision, dest: Path, db: Database
+    fi: FileInfo, decision: Decision, dest: Path, db: Database,
+    state_source_override: str | None = None,
 ) -> None:
     """Grava todas as tabelas em UMA única transação atômica.
 
     Usa db.record_file_transaction para evitar contenção de lock SQLite em
     execuções multi-thread (substitui 3 commits separados por 1).
+    state_source_override: se fornecido, usa esse path em source_states em vez de fi.source_path
+    (necessário quando a origem foi renomeada com _ok após a cópia).
     """
     metadata_json = json.dumps(fi.metadata_json, default=str) if fi.metadata_json else None
 
@@ -247,7 +269,7 @@ def _record_to_db(
         }
 
     state_data = {
-        "source_path": fi.source_path,
+        "source_path": state_source_override or fi.source_path,
         "repository_name_canonical": fi.repository_name_canonical,
         "size_bytes": fi.size_bytes,
         "mtime_epoch": fi.mtime_epoch,
